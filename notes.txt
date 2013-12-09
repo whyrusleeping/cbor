@@ -1,0 +1,7 @@
+http://tools.ietf.org/html/rfc7049
+
+Go
+https://github.com/cespare/cbor
+
+python
+https://github.com/svartalf/python-cbor
