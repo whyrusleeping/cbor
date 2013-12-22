@@ -56,14 +56,14 @@
 #define CBOR_TAG_NEGBIGNUM (CBOR_TAG | 3)  /* big endian byte string follows */
 #define CBOR_TAG_DECIMAL (CBOR_TAG | 4) /* [ 10^x exponent, number ] */
 #define CBOR_TAG_BIGFLOAT (CBOR_TAG | 5) /* [ 2^x exponent, number ] */
-#define CBOR_TAG_BASE64URL (CBOR_TAG | 21)
-#define CBOR_TAG_BASE64 (CBOR_TAG | 22)
+//#define CBOR_TAG_BASE64URL (CBOR_TAG | 21)
+//#define CBOR_TAG_BASE64 (CBOR_TAG | 22)
 #define CBOR_TAG_BASE16 (CBOR_TAG | 23)
 #define CBOR_TAG_CBOR (CBOR_TAG | 24) /* following byte string is embedded CBOR data */
 
 #define CBOR_TAG_URI 32
-#define CBOR_TAG_BASE64URL 33
-#define CBOR_TAG_BASE64 34
+//#define CBOR_TAG_BASE64URL 33
+//#define CBOR_TAG_BASE64 34
 #define CBOR_TAG_REGEX 35
 #define CBOR_TAG_MIME 36 /* following text is MIME message, headers, separators and all */
 #define CBOR_TAG_CBOR_FILEHEADER 55799  /* can open a file with 0xd9d9f7 */

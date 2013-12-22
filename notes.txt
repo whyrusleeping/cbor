@@ -1,7 +1,11 @@
+This project:
+http://code.google.com/p/cbor/
+
+The standard:
 http://tools.ietf.org/html/rfc7049
 
-Go
+a Go implementation in progress
 https://github.com/cespare/cbor
 
-python
+another python implementation, currently not as complete
 https://github.com/svartalf/python-cbor
