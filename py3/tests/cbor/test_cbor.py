@@ -73,22 +73,22 @@ class XTestCBOR(object):
         self._oso([1,2,3])
         self._oso({})
         self._oso(b'aoeu1234\x00\xff')
-        self._oso(u'åöéûのかめ亀')
+        self._oso('åöéûのかめ亀')
 
     def test_random_ints(self):
         icount = self.speediterations()
-        for i in xrange(icount):
+        for i in range(icount):
             v = random.randint(-1000000000, 1000000000)
             self._oso(v)
         oldv = []
-        for i in xrange(int(icount / 10)):
+        for i in range(int(icount / 10)):
             v = random.randint(-1000000000000000000000, 1000000000000000000000)
             self._oso(v)
             oldv.append(v)
 
     def test_randobs(self):
         icount = self.speediterations()
-        for i in xrange(icount):
+        for i in range(icount):
             ob = _randob()
             self._oso(ob)
 
@@ -102,7 +102,7 @@ class XTestCBOR(object):
     def test_speed_vs_json(self):
         # It should be noted that the python standard library has a C implementation of key parts of json encoding and decoding
         icount = self.speediterations()
-        obs = [_randob() for x in xrange(icount)]
+        obs = [_randob() for x in range(icount)]
         st = time.time()
         bsers = [self.dumps(o) for o in obs]
         nt = time.time()
@@ -115,7 +115,7 @@ class XTestCBOR(object):
             sum(map(len, bsers)), cbor_ser_time, len(obs) / cbor_ser_time,
             sum(map(len, jsers)), json_ser_time, len(obs) / json_ser_time))
         bsersz = zlib.compress(b''.join(bsers))
-        jsersz = zlib.compress(b''.join(jsers))
+        jsersz = zlib.compress((''.join(jsers)).encode('utf8'))
         sys.stderr.write('compress to {0} bytes cbor.gz and {1} bytes json.gz\n'.format(
             len(bsersz), len(jsersz)))
 
@@ -135,7 +135,7 @@ class XTestCBOR(object):
         try:
             ob = self.loads(None)
             assert False, "expected ValueError when passing in None"
-        except ValueError, ve:
+        except ValueError as ve:
             pass
 
     # def test_concat():
@@ -167,17 +167,17 @@ class TestCBORCC(unittest.TestCase, XTestCBOR, TestCC):
 
 
 def _randArray():
-    return [_randob() for x in xrange(random.randint(0,5))]
+    return [_randob() for x in range(random.randint(0,5))]
 
-_chars = [chr(x) for x in xrange(ord(' '), ord('~'))]
+_chars = [chr(x) for x in range(ord(' '), ord('~'))]
 
 def _randString():
-    return ''.join([random.choice(_chars) for x in xrange(random.randint(1,10))])
+    return ''.join([random.choice(_chars) for x in range(random.randint(1,10))])
 
 
 def _randDict():
     ob = {}
-    for x in xrange(random.randint(0,5)):
+    for x in range(random.randint(0,5)):
         ob[_randString()] = _randob()
     return ob
 
@@ -193,7 +193,7 @@ _randob_probabilities = [
     (0.4, _randInt),
 ]
 
-_randob_probsum = sum(map(lambda x: x[0], _randob_probabilities))
+_randob_probsum = sum([x[0] for x in _randob_probabilities])
 
 
 def _randob():
