@@ -8,3 +8,4 @@ build
 Attic
 *.so
 test-vectors
+py/dist
