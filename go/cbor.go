@@ -11,6 +11,7 @@ import "log"
 import "math"
 import "math/big"
 import "reflect"
+import "strings"
 
 var typeMask byte = 0xE0
 var infoBits byte = 0x1F
@@ -158,7 +159,34 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 		}
 	} else if cborType == cborText {
 		if cborInfo == varFollows {
-			return errors.New("TODO: implement var text")
+			parts := make([]string, 0, 1)
+			subc := []byte{0}
+			for true {
+				_, err = io.ReadFull(dec.rin, subc)
+				if err != nil {
+					log.Printf("error reading next byte for var text")
+					return err
+				}
+				if subc[0] == 0xff {
+					// done
+					joined := strings.Join(parts, "")
+					reflect.Indirect(rv).Set(reflect.ValueOf(joined))
+					return nil
+				} else {
+					var subtext interface{}
+					err = dec.innerDecodeC(reflect.ValueOf(&subtext), subc[0])
+					if err != nil {
+						log.Printf("error decoding subtext")
+						return err
+					}
+					st, ok := subtext.(string)
+					if ok {
+						parts = append(parts, st)
+					} else {
+						return fmt.Errorf("var text sub element not text but %T", subtext)
+					}
+				}
+			}
 		} else {
 			raw := make([]byte, aux)
 			_, err = io.ReadFull(dec.rin, raw)
@@ -167,9 +195,9 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			 return nil
 		 }
 	 } else if cborType == cborArray {
-		 log.Printf("cborType %x array cborInfo %d aux %x", cborType, cborInfo, aux)
+		 return dec.decodeArray(rv, cborInfo, aux)
 	 } else if cborType == cborMap {
-		 log.Printf("cborType %x map cborInfo %d aux %x", cborType, cborInfo, aux)
+		 return dec.decodeMap(rv, cborInfo, aux)
 	 } else if cborType == cborTag {
 		 /*var innerOb interface{}*/
 		 ic := []byte{0}
@@ -238,6 +266,148 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 	return err
 }
 
+func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error {
+	// dereferenced reflect value
+	var drv reflect.Value
+	if rv.Kind() == reflect.Ptr {
+		drv = reflect.Indirect(rv)
+	} else {
+		drv = rv
+	}
+
+	// inner reflect value
+	var irv reflect.Value
+
+	switch drv.Kind() {
+	case reflect.Interface:
+		nob := make(map[interface{}]interface{})
+		irv = reflect.ValueOf(nob)
+	default:
+		return fmt.Errorf("can't read map into %s", rv.Type().String())
+	}
+
+	var err error
+
+	if cborInfo == varFollows {
+		//return errors.New("TODO: WRITEME var decodeMap()")
+		subc := []byte{0}
+		for true {
+			_, err = io.ReadFull(dec.rin, subc)
+			if err != nil {
+				log.Printf("error reading next byte for var text")
+				return err
+			}
+			if subc[0] == 0xff {
+				// Done
+				break
+			} else {
+				var key interface{}
+				var val interface{}
+				err = dec.innerDecodeC(reflect.ValueOf(&key), subc[0])
+				if err != nil {
+					log.Printf("error decoding map key")
+					return err
+				}
+				err = dec.Decode(&val)
+				if err != nil {
+					log.Printf("error decoding map val")
+					return err
+				}
+				irv.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(val))
+			}
+		}
+	} else {
+		var i uint64
+		for i = 0; i < aux; i++ {
+			var key interface{}
+			var val interface{}
+			err = dec.Decode(&key)
+			if err != nil {
+				log.Printf("error decoding map key")
+				return err
+			}
+			err = dec.Decode(&val)
+			if err != nil {
+				log.Printf("error decoding map val")
+				return err
+			}
+			irv.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(val))
+		}
+	}
+	drv.Set(irv)
+	return nil
+}
+
+func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) error {
+	if rv.Kind() == reflect.Ptr {
+		rv = reflect.Indirect(rv)
+	}
+
+	var makeLength int = 0
+	if cborInfo == varFollows {
+		// no special capacity to allocate the slice to
+	} else {
+		makeLength = int(aux)
+	}
+
+	// inner reflect value
+	var irv reflect.Value
+
+	switch rv.Kind() {
+	case reflect.Interface:
+		nob := make([]interface{}, 0, makeLength)
+		irv = reflect.ValueOf(nob)
+/*
+	case reflect.Slice:
+		irv = rv
+*/
+	default:
+		return fmt.Errorf("can't read array into %s", rv.Type().String())
+	}
+
+	var err error
+
+	if cborInfo == varFollows {
+		//log.Printf("var array")
+		subc := []byte{0}
+		for true {
+			_, err = io.ReadFull(dec.rin, subc)
+			if err != nil {
+				log.Printf("error reading next byte for var text")
+				return err
+			}
+			if subc[0] == 0xff {
+				// Done
+				break
+			} else {
+				var subob interface{}
+				subrv := reflect.ValueOf(&subob)
+				err := dec.innerDecodeC(subrv, subc[0])
+				if err != nil {
+					log.Printf("error decoding array subob")
+					return err
+				}
+				log.Printf("va subob %#v", subob)
+				irv = reflect.Append(irv, reflect.ValueOf(subob))
+			}
+		}
+	} else {
+		var i uint64
+		for i = 0; i < aux; i++ {
+			var subob interface{}
+			err := dec.Decode(&subob)
+			if err != nil {
+				log.Printf("error decoding array subob")
+				return err
+			}
+			irv = reflect.Append(irv, reflect.ValueOf(subob))
+		}
+	}
+
+	rv.Set(irv)
+
+	return nil
+}
 
 func (dec *Decoder) decodeBignum(c byte) (*big.Int, error) {
 	cborType := c & typeMask
