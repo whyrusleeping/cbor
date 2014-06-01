@@ -26,6 +26,13 @@ var cborMap byte = 0xA0
 var cborTag byte = 0xC0
 var cbor7 byte = 0xE0
 
+/* cbor7 values */
+const (
+	cborFalse byte = 20
+	cborTrue byte = 21
+	cborNull byte = 22
+)
+
 /* info bits */
 var int8Follows byte = 24
 var int16Follows byte = 25
@@ -159,7 +166,16 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 		} else {
 			val := make([]byte, aux)
 			_, err = io.ReadFull(dec.rin, val)
+			if err != nil {
+				return err
+			}
 			// Don't really care about count, ReadFull will make it all or none and we can just fall out with whatever error
+			return setBytes(rv, val)
+			if (rv.Kind() == reflect.Slice) && (rv.Type().Elem().Kind() == reflect.Uint8) {
+				rv.SetBytes(val)
+			} else {
+				return fmt.Errorf("cannot write []byte to k=%s %s", rv.Kind().String(), rv.Type().String())
+			}
 		}
 	} else if cborType == cborText {
 		if cborInfo == varFollows {
@@ -257,11 +273,11 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 		 } else if cborInfo == int64Follows {
 			 d := math.Float64frombits(aux)
 			 return setFloat64(rv, d)
-		 } else if cborInfo == 20 {
+		 } else if cborInfo == cborFalse {
 			 reflect.Indirect(rv).Set(reflect.ValueOf(false))
-		 } else if cborInfo == 21 {
+		 } else if cborInfo == cborTrue {
 			 reflect.Indirect(rv).Set(reflect.ValueOf(true))
-		 } else if cborInfo == 22 {
+		 } else if cborInfo == cborNull {
 			 rv.Set(reflect.Zero(rv.Type()))
 		 }
 	 }
@@ -419,7 +435,7 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 		ma = &StructAssigner{drv}
 		keyType = reflect.TypeOf("")
 	case reflect.Map:
-		log.Printf("decode into %s", drv.Type().String())
+		//log.Printf("decode into %s", drv.Type().String())
 		if drv.IsNil() {
 			if drv.CanSet() {
 				drv.Set(reflect.MakeMap(drv.Type()))
@@ -614,6 +630,26 @@ func setBignum(rv reflect.Value, x *big.Int) error {
 		return fmt.Errorf("cannot assign bignum into Kind=%s Type=%s %#v", rv.Kind().String(), rv.Type().String(), rv)
 	}
 }
+
+func setBytes(rv reflect.Value, buf []byte) error {
+	switch rv.Kind() {
+	case reflect.Ptr:
+		return setBytes(reflect.Indirect(rv), buf)
+	case reflect.Interface:
+		rv.Set(reflect.ValueOf(buf))
+		return nil
+	case reflect.Slice:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			rv.SetBytes(buf)
+			return nil
+		} else {
+			return fmt.Errorf("cannot write []byte to k=%s %s", rv.Kind().String(), rv.Type().String())
+		}
+	default:
+		return fmt.Errorf("cannot assign []byte into Kind=%s Type=%s %#v", rv.Kind().String(), rv.Type().String(), rv)
+	}
+}
+
 func setUint(rv reflect.Value, u uint64) error {
 	switch rv.Kind() {
 	case reflect.Ptr:
@@ -700,4 +736,213 @@ func (e *InvalidUnmarshalError) Error() string {
 		return "json: Unmarshal(non-pointer " + e.Type.String() + ")"
 	}
 	return "json: Unmarshal(nil " + e.Type.String() + ")"
+}
+
+
+type CBORTag struct {
+	Tag uint64
+	WrappedObject interface{}
+}
+
+
+type Encoder struct {
+	out io.Writer
+
+	scratch []byte
+}
+
+func Encode(out io.Writer, ob interface{}) error {
+	return NewEncoder(out).Write(ob)
+}
+
+func NewEncoder(out io.Writer) *Encoder {
+	return &Encoder{out, make([]byte, 9)}
+}
+
+
+func (enc *Encoder) Write(ob interface{}) error {
+	switch x := ob.(type) {
+	case int:
+		return enc.writeInt(int64(x))
+	case int8:
+		return enc.writeInt(int64(x))
+	case int16:
+		return enc.writeInt(int64(x))
+	case int32:
+		return enc.writeInt(int64(x))
+	case int64:
+		return enc.writeInt(x)
+	case uint:
+		return enc.tagAuxOut(cborUint, uint64(x))
+	case uint8:  /* aka byte */
+		return enc.tagAuxOut(cborUint, uint64(x))
+	case uint16:
+		return enc.tagAuxOut(cborUint, uint64(x))
+	case uint32:
+		return enc.tagAuxOut(cborUint, uint64(x))
+	case uint64:
+		return enc.tagAuxOut(cborUint, x)
+	case float32:
+		return enc.writeFloat(float64(x))
+	case float64:
+		return enc.writeFloat(x)
+	case string:
+		return enc.writeText(x)
+	case []byte:
+		return enc.writeBytes(x)
+	case bool:
+		return enc.writeBool(x)
+	case nil:
+		return enc.tagAuxOut(cbor7, uint64(cborNull))
+	case big.Int:
+		return fmt.Errorf("TODO: encode big.Int")
+	}
+	
+	// If none of the simple types work, try reflection
+	return enc.writeReflection(reflect.ValueOf(ob))
+}
+
+func (enc *Encoder) writeReflection(rv reflect.Value) error {
+	var err error
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return enc.writeInt(rv.Int())
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return enc.tagAuxOut(cborUint, rv.Uint())
+	case reflect.Float32, reflect.Float64:
+		return enc.writeFloat(rv.Float())
+	case reflect.Bool:
+		return enc.writeBool(rv.Bool())
+	case reflect.String:
+		return enc.writeText(rv.String())
+	case reflect.Slice:
+		elemType := rv.Type().Elem()
+		if elemType.Kind() == reflect.Uint8 {
+			// special case, write out []byte
+			return enc.writeBytes(rv.Bytes())
+		}
+		alen := rv.Len()
+		err = enc.tagAuxOut(cborArray, uint64(alen))
+		for i := 0; i < alen; i++ {
+			err = enc.writeReflection(rv.Index(i))
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Map:
+		err = enc.tagAuxOut(cborMap, uint64(rv.Len()))
+		keys := rv.MapKeys()
+		for _, krv := range(keys) {
+			vrv := rv.MapIndex(krv)
+			err = enc.writeReflection(krv)
+			if err != nil {
+				return err
+			}
+			err = enc.writeReflection(vrv)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Struct:
+		// TODO: check for big.Int ?
+		numfields := rv.NumField()
+		structType := rv.Type()
+		err = enc.tagAuxOut(cborMap, uint64(numfields))
+		if err != nil {
+			return err
+		}
+		for i := 0; i < numfields; i++ {
+			fieldinfo := structType.Field(i)
+			err = enc.writeText(fieldinfo.Name)
+			if err != nil {
+				return err
+			}
+			err = enc.writeReflection(rv.Field(i))
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Ptr:
+		if rv.IsNil() {
+			return enc.tagAuxOut(cbor7, uint64(cborNull))
+		}
+		return enc.writeReflection(reflect.Indirect(rv))
+	}
+
+	return fmt.Errorf("don't know how to CBOR serialize %T", rv.Type().String())
+}
+
+func (enc *Encoder) writeInt(x int64) error {
+	if (x < 0) {
+		return enc.tagAuxOut(cborNegint, uint64(-1 - x))
+	}
+	return enc.tagAuxOut(cborUint, uint64(x))
+}
+
+func (enc *Encoder) tagAuxOut(tag byte, x uint64) error {
+	var err error
+	if x <= 23 {
+		// tiny literal
+		enc.scratch[0] = tag | byte(x)
+		_, err = enc.out.Write(enc.scratch[:1])
+	} else if x < 0x0ff {
+		enc.scratch[0] = tag | int8Follows
+		enc.scratch[1] = byte(x & 0x0ff)
+		_, err = enc.out.Write(enc.scratch[:2])
+	} else if x < 0x0ffff {
+		enc.scratch[0] = tag | int16Follows
+		enc.scratch[1] = byte((x >> 8) & 0x0ff)
+		enc.scratch[2] = byte(x & 0x0ff)
+		_, err = enc.out.Write(enc.scratch[:3])
+	} else if x < 0x0ffffffff {
+		enc.scratch[0] = tag | int32Follows
+		enc.scratch[1] = byte((x >> 24) & 0x0ff)
+		enc.scratch[2] = byte((x >> 16) & 0x0ff)
+		enc.scratch[3] = byte((x >>  8) & 0x0ff)
+		enc.scratch[4] = byte(x & 0x0ff)
+		_, err = enc.out.Write(enc.scratch[:5])
+	} else {
+		err = enc.tagAux64(tag, x)
+	}
+	return err
+}
+func (enc *Encoder) tagAux64(tag byte, x uint64) error {
+	enc.scratch[0] = tag | int64Follows
+	enc.scratch[1] = byte((x >> 56) & 0x0ff)
+	enc.scratch[2] = byte((x >> 48) & 0x0ff)
+	enc.scratch[3] = byte((x >> 40) & 0x0ff)
+	enc.scratch[4] = byte((x >> 32) & 0x0ff)
+	enc.scratch[5] = byte((x >> 24) & 0x0ff)
+	enc.scratch[6] = byte((x >> 16) & 0x0ff)
+	enc.scratch[7] = byte((x >>  8) & 0x0ff)
+	enc.scratch[8] = byte(x & 0x0ff)
+	_, err := enc.out.Write(enc.scratch[:9])
+	return err
+}
+
+func (enc *Encoder) writeText(x string) error {
+	enc.tagAuxOut(cborText, uint64(len(x)))
+	_, err := io.WriteString(enc.out, x)
+	return err
+}
+
+func (enc *Encoder) writeBytes(x []byte) error {
+	enc.tagAuxOut(cborBytes, uint64(len(x)))
+	_, err := enc.out.Write(x)
+	return err
+}
+
+func (enc *Encoder) writeFloat(x float64) error {
+	return enc.tagAux64(cbor7, math.Float64bits(x))
+}
+
+func (enc *Encoder) writeBool(x bool) error {
+	if x {
+		return enc.tagAuxOut(cbor7, uint64(cborTrue))
+	} else {
+		return enc.tagAuxOut(cbor7, uint64(cborFalse))
+	}
 }

@@ -2,6 +2,7 @@ package cbor
 
 import "bytes"
 import "encoding/base64"
+import "encoding/hex"
 import "encoding/json"
 import "fmt"
 import "log"
@@ -40,10 +41,12 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 	switch i := cborv.(type) {
 	case uint64:
 		switch jv := jsonv.(type) {
+		case int:
+			return (jv >= 0) && (uint64(jv) == i)
 		case uint64:
-			return i == jv;
+			return i == jv
 		case float64:
-			return math.Abs(float64(i) - jv) < math.Max(math.Abs(jv / 1000000000.0), 1.0/1000000000.0);
+			return math.Abs(float64(i) - jv) < math.Max(math.Abs(jv / 1000000000.0), 1.0/1000000000.0)
 		case json.Number:
 			return jv.String() == fmt.Sprintf("%d", i)
 		default:
@@ -60,6 +63,8 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		}
 	case int64:
 		switch jv := jsonv.(type) {
+		case int:
+			return int64(jv) == i
 		case json.Number:
 			return jv.String() == fmt.Sprintf("%d", i)
 		default:
@@ -129,6 +134,9 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 			}
 			return true
 		default:
+			if reflect.DeepEqual(cborv, jsonv) {
+				return true
+			}
 			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
 			return false
 		}
@@ -161,6 +169,14 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 */
 			}
 			return true
+		default:
+			t.Errorf("wat types cbor %T json %T", cborv, jv);
+			return false
+		}
+	case []byte:
+		switch jv := jsonv.(type) {
+		case []byte:
+			return bytes.Equal(i, jv)
 		default:
 			t.Errorf("wat types cbor %T json %T", cborv, jv);
 			return false
@@ -304,4 +320,54 @@ func TestDecodeReflectivelyOne(t *testing.T) {
 	if !checkObOne(they, t) {
 		return
 	}
+}
+
+func objectSerializedObject(t *testing.T, ob interface{}) {
+	out := reflect.Indirect(reflect.New(reflect.TypeOf(ob))).Interface()
+	//t.Logf("oso ob T %T %#v, out T %T %#v", ob, ob, out, out)
+
+	//scratch := make([]byte, 0)
+	//writeTarget := bytes.NewBuffer(scratch)
+	writeTarget := &bytes.Buffer{}
+	writeTarget.Grow(20000)
+	err := Encode(writeTarget, ob)
+	if err != nil {
+		t.Errorf("failed on encode: %s", err)
+		return
+	}
+
+	scratch := writeTarget.Bytes()
+	dec := NewDecoder(bytes.NewReader(scratch))
+	err = dec.Decode(&out)
+
+	t.Logf("oso ob T %T %#v, out T %T %#v", ob, ob, out, out)
+
+	if err != nil {
+		t.Log(scratch)
+		t.Errorf("failed on decode: %s", err)
+		return
+	}
+
+	if !jeq(ob, out, t) {
+		t.Log(hex.EncodeToString(scratch))
+		t.Errorf("%#v != %#v", ob, out)
+	}
+}
+
+func TestOSO(t *testing.T) {
+	objectSerializedObject(t, 0)
+	objectSerializedObject(t, 1)
+	objectSerializedObject(t, 2)
+	objectSerializedObject(t, -1)
+	objectSerializedObject(t, true)
+	objectSerializedObject(t, false)
+	// TODO: some of these don't quite work yet
+	//objectSerializedObject(t, nil)
+	objectSerializedObject(t, []interface{}{})
+	//objectSerializedObject(t, []int{})
+	//objectSerializedObject(t, []int{1,2,3})
+	objectSerializedObject(t, "hello")
+	objectSerializedObject(t, []byte{1,3,2})
+	//objectSerializedObject(t, RefTestOb{"hi", -1000, 137, 0.5, nil, nil, true})
+//	objectSerializedObject(t, )
 }
