@@ -9,6 +9,7 @@ import "math"
 import "math/big"
 import "os"
 import "reflect"
+import "strings"
 import "testing"
 
 type testVector struct {
@@ -177,7 +178,7 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 }
 
 
-func TestDecodeInt(t *testing.T) {
+func TestDecodeVectors(t *testing.T) {
 	t.Parallel()
 	they, err := readVectors(t)
 	if err != nil {
@@ -191,7 +192,7 @@ func TestDecodeInt(t *testing.T) {
 	}
 	for i, testv := range(they) {
 		if testv.Decoded != nil && len(testv.Cbor) > 0 {
-			log.Printf("hex %s", testv.Hex)
+			//log.Printf("hex %s", testv.Hex)
 			t.Logf("hex %s", testv.Hex)
 			bin, err := base64.StdEncoding.DecodeString(testv.Cbor)
 			if err != nil {
@@ -216,5 +217,91 @@ func TestDecodeInt(t *testing.T) {
 				t.Logf("------")
 			}
 		}
+	}
+}
+
+
+type RefTestOb struct {
+	AString string
+	BInt int
+	CUint uint64
+	DFloat float64
+	EIntArray []int
+	FStrIntMap map[string]int
+	GBool bool
+}
+
+
+func checkObOne(ob RefTestOb, t *testing.T) bool {
+	ok := true
+	if ob.AString != "astring val" {
+		t.Errorf("AString wanted \"astring val\" but got %#v", ob.AString)
+		ok = false
+	}
+	if ob.BInt != -33 {
+		t.Errorf("BInt wanted -33 but got %#v", ob.BInt)
+		ok = false
+	}
+	if ob.CUint != 42 {
+		t.Errorf("CUint wanted 42 but got %#v", ob.CUint)
+		ok = false
+	}
+	if ob.DFloat != 0.25 {
+		t.Errorf("DFloat wanted 02.5 but got %#v", ob.DFloat)
+		ok = false
+	}
+	return ok
+}
+
+
+const (
+	reflexObOneJson = "{\"astring\": \"astring val\", \"bint\": -33, \"cuint\": 42, \"dfloat\": 0.25, \"eintarray\": [1,2,3], \"fstrintmap\":{\"a\":13, \"b\":14}, \"gbool\": false}"
+	reflexObOneCborB64 = "p2dhc3RyaW5na2FzdHJpbmcgdmFsamZzdHJpbnRtYXCiYWENYWIOZWdib29s9GRiaW50OCBpZWludGFycmF5gwECA2VjdWludBgqZmRmbG9hdPs/0AAAAAAAAA=="
+)
+
+/*
+#python
+import json
+import cbor
+import base64
+# copy in the above json string literal here:
+jsonstr = 
+print base64.b64encode(cbor.dumps(json.loads(jsonstr)))
+*/
+
+func TestDecodeReflectivelyOne(t *testing.T) {
+	t.Parallel()
+
+	var err error
+	
+	jd := json.NewDecoder(strings.NewReader(reflexObOneJson))
+	jd.UseNumber()
+	they := RefTestOb{}
+	err = jd.Decode(&they)
+	if err != nil {
+		t.Fatal("could not decode json", err)
+		return
+	}
+
+	t.Log("check json")
+	if !checkObOne(they, t) {
+		return
+	}
+
+	bin, err := base64.StdEncoding.DecodeString(reflexObOneCborB64)
+	if err != nil {
+		t.Fatal("error decoding cbor b64", err)
+		return
+	}
+	ring := NewDecoder(bytes.NewReader(bin))
+	cob := RefTestOb{}
+	err = ring.Decode(&cob)
+	if err != nil {
+		t.Fatal("error decoding cbor", err)
+		return
+	}
+	t.Log("check cbor")
+	if !checkObOne(they, t) {
+		return
 	}
 }

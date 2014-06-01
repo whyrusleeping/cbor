@@ -59,15 +59,15 @@ func NewDecoder(r io.Reader) *Decoder {
 	}
 }
 func (dec *Decoder) Decode(v interface{}) error {
+        rv := reflect.ValueOf(v)
+
+	return dec.reflectDecode(rv)
+}
+func (dec *Decoder) reflectDecode(rv reflect.Value) error {
 	var didread int
 	var err error
 
 	didread, err = io.ReadFull(dec.rin, dec.c)
-
-        rv := reflect.ValueOf(v)
-        if rv.Kind() != reflect.Ptr || rv.IsNil() {
-                return &InvalidUnmarshalError{reflect.TypeOf(v)}
-        }
 
 	if didread == 1 {
 		/* log.Printf("got one %x\n", dec.c[0]) */
@@ -76,6 +76,10 @@ func (dec *Decoder) Decode(v interface{}) error {
 	if err != nil {
 		return err
 	}
+
+        if (!rv.CanSet()) && (rv.Kind() != reflect.Ptr || rv.IsNil()) {
+                return &InvalidUnmarshalError{rv.Type()}
+        }
 	return dec.innerDecodeC(rv, dec.c[0])
 }
 
@@ -266,6 +270,119 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 	return err
 }
 
+type MapAssignable interface {
+	SetKeyValue(key, value interface{})
+	ReflectValueForKey(key interface{}) (*reflect.Value, bool)
+	SetReflectValueForKey(key interface{}, value reflect.Value) error
+}
+
+type MapReflectValue struct {
+	reflect.Value
+}
+
+func (irv *MapReflectValue) SetKeyValue(key, value interface{}) {
+	irv.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(value))
+}
+func (irv *MapReflectValue) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
+	//var x interface{}
+	//rv := reflect.ValueOf(&x)
+	rv := reflect.New(irv.Type().Elem())
+	return &rv, true
+}
+func (irv *MapReflectValue) SetReflectValueForKey(key interface{}, value reflect.Value) error {
+	//log.Printf("k T %T v%#v, v T %s v %#v", key, key, value.Type().String(), value.Interface())
+	krv := reflect.Indirect(reflect.ValueOf(key))
+	vrv := reflect.Indirect(value)
+	//log.Printf("irv T %s v %#v", irv.Type().String(), irv.Interface())
+	//log.Printf("k T %s v %#v, v T %s v %#v", krv.Type().String(), krv.Interface(), vrv.Type().String(), vrv.Interface())
+	irv.SetMapIndex(krv, vrv)
+	return nil
+}
+
+
+type StructAssigner struct {
+	Srv reflect.Value
+
+	//keyType reflect.Type
+}
+
+func (sa *StructAssigner) SetKeyValue(key, value interface{}) {
+	skey, ok := key.(string)
+	if ! ok {
+		log.Printf("skv key is not string, got %T", key)
+		return
+	}
+
+	ft := sa.Srv.Type()
+	numFields := ft.NumField()
+	for i := 0; i < numFields; i++ {
+		sf := ft.Field(i)
+		if (sf.Name == skey) || strings.EqualFold(sf.Name, skey) {
+			sa.Srv.FieldByName(sf.Name).Set(reflect.ValueOf(value))
+			return
+		}
+		//log.Printf("field[%d] %#v %s", i, sf.Name, sf.Type)
+	}
+}
+
+func (sa *StructAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
+	var skey string
+	switch tkey := key.(type) {
+	case string:
+		skey = tkey
+	case *string:
+		skey= *tkey
+	default:
+		log.Printf("rvfk key is not string, got %T", key)
+		return nil, false
+	}
+
+	ft := sa.Srv.Type()
+	numFields := ft.NumField()
+	for i := 0; i < numFields; i++ {
+		sf := ft.Field(i)
+		if (sf.Name == skey) || strings.EqualFold(sf.Name, skey) {
+			fieldVal := sa.Srv.FieldByName(sf.Name)
+			if !fieldVal.CanSet() {
+				log.Printf("cannot set field %s", sf.Name)
+				return nil, false
+			}
+			return &fieldVal, true
+		}
+	}
+	return nil, false
+}
+func (sa *StructAssigner) SetReflectValueForKey(key interface{}, value reflect.Value) error {
+	return nil
+}
+
+
+func (dec *Decoder) setMapKV(krv reflect.Value, ma MapAssignable) error {
+	var err error
+	val, ok := ma.ReflectValueForKey(krv.Interface())
+	if !ok {
+		var throwaway interface{}
+		err = dec.Decode(&throwaway)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	err = dec.reflectDecode(*val)
+	if err != nil {
+		log.Printf("error decoding map val: T %T v %#v v.T %s", val, val, val.Type().String())
+		return err
+	}
+	err = ma.SetReflectValueForKey(krv.Interface(), *val)
+	if err != nil {
+		log.Printf("error setting value")
+		return err
+	}
+
+	return nil
+}
+
+
 func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error {
 	// dereferenced reflect value
 	var drv reflect.Value
@@ -277,11 +394,41 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 
 	// inner reflect value
 	var irv reflect.Value
+	var ma MapAssignable
+
+	var keyType reflect.Type
+	//var valType reflect.Type
 
 	switch drv.Kind() {
 	case reflect.Interface:
+		// TODO: maybe I should make this map[string]interface{}
 		nob := make(map[interface{}]interface{})
 		irv = reflect.ValueOf(nob)
+		ma = &MapReflectValue{irv}
+		keyType = irv.Type().Key()
+		//valType = irv.Type().Elem()
+	case reflect.Struct:
+		/*
+		ft := drv.Type()
+		numFields := ft.NumField()
+		for i := 0; i < numFields; i++ {
+			sf := ft.Field(i)
+			//log.Printf("field[%d] %#v %s", i, sf.Name, sf.Type)
+		}
+*/
+		ma = &StructAssigner{drv}
+		keyType = reflect.TypeOf("")
+	case reflect.Map:
+		log.Printf("decode into %s", drv.Type().String())
+		if drv.IsNil() {
+			if drv.CanSet() {
+				drv.Set(reflect.MakeMap(drv.Type()))
+			} else {
+				return fmt.Errorf("target map is nil and not settable")
+			}
+		}
+		keyType = drv.Type().Key()
+		ma = &MapReflectValue{drv}
 	default:
 		return fmt.Errorf("can't read map into %s", rv.Type().String())
 	}
@@ -289,7 +436,6 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 	var err error
 
 	if cborInfo == varFollows {
-		//return errors.New("TODO: WRITEME var decodeMap()")
 		subc := []byte{0}
 		for true {
 			_, err = io.ReadFull(dec.rin, subc)
@@ -301,40 +447,43 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 				// Done
 				break
 			} else {
-				var key interface{}
-				var val interface{}
-				err = dec.innerDecodeC(reflect.ValueOf(&key), subc[0])
+				//var key interface{}
+				krv := reflect.New(keyType)
+				//var val interface{}
+				err = dec.innerDecodeC(krv, subc[0])
 				if err != nil {
 					log.Printf("error decoding map key")
 					return err
 				}
-				err = dec.Decode(&val)
+
+				err = dec.setMapKV(krv, ma)
 				if err != nil {
-					log.Printf("error decoding map val")
 					return err
 				}
-				irv.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(val))
 			}
 		}
 	} else {
 		var i uint64
 		for i = 0; i < aux; i++ {
-			var key interface{}
-			var val interface{}
-			err = dec.Decode(&key)
+			//var key interface{}
+			krv := reflect.New(keyType)
+			//var val interface{}
+			//err = dec.Decode(&key)
+			err = dec.reflectDecode(krv)
 			if err != nil {
 				log.Printf("error decoding map key")
 				return err
 			}
-			err = dec.Decode(&val)
+			err = dec.setMapKV(krv, ma)
 			if err != nil {
-				log.Printf("error decoding map val")
 				return err
 			}
-			irv.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(val))
 		}
 	}
-	drv.Set(irv)
+
+	if drv.Kind() == reflect.Interface {
+		drv.Set(irv)
+	}
 	return nil
 }
 
@@ -357,14 +506,13 @@ func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) err
 	case reflect.Interface:
 		nob := make([]interface{}, 0, makeLength)
 		irv = reflect.ValueOf(nob)
-/*
 	case reflect.Slice:
 		irv = rv
-*/
 	default:
 		return fmt.Errorf("can't read array into %s", rv.Type().String())
 	}
 
+	elemType := irv.Type().Elem()
 	var err error
 
 	if cborInfo == varFollows {
@@ -380,27 +528,25 @@ func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) err
 				// Done
 				break
 			} else {
-				var subob interface{}
-				subrv := reflect.ValueOf(&subob)
+				subrv := reflect.New(elemType)
 				err := dec.innerDecodeC(subrv, subc[0])
 				if err != nil {
 					log.Printf("error decoding array subob")
 					return err
 				}
-				log.Printf("va subob %#v", subob)
-				irv = reflect.Append(irv, reflect.ValueOf(subob))
+				irv = reflect.Append(irv, reflect.Indirect(subrv))
 			}
 		}
 	} else {
 		var i uint64
 		for i = 0; i < aux; i++ {
-			var subob interface{}
-			err := dec.Decode(&subob)
+			subrv := reflect.New(elemType)
+			err := dec.reflectDecode(subrv)
 			if err != nil {
 				log.Printf("error decoding array subob")
 				return err
 			}
-			irv = reflect.Append(irv, reflect.ValueOf(subob))
+			irv = reflect.Append(irv, reflect.Indirect(subrv))
 		}
 	}
 
@@ -450,8 +596,22 @@ func setBignum(rv reflect.Value, x *big.Int) error {
 	case reflect.Interface:
 		rv.Set(reflect.ValueOf(*x))
 		return nil
+	case reflect.Int32:
+		if x.BitLen() < 32 {
+			rv.SetInt(x.Int64())
+			return nil
+		} else {
+			return fmt.Errorf("int too big for int32 target")
+		}
+	case reflect.Int, reflect.Int64:
+		if x.BitLen() < 64 {
+			rv.SetInt(x.Int64())
+			return nil
+		} else {
+			return fmt.Errorf("int too big for int64 target")
+		}
 	default:
-		return fmt.Errorf("cannot assign uint into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
+		return fmt.Errorf("cannot assign bignum into Kind=%s Type=%s %#v", rv.Kind().String(), rv.Type().String(), rv)
 	}
 }
 func setUint(rv reflect.Value, u uint64) error {
@@ -463,6 +623,12 @@ func setUint(rv reflect.Value, u uint64) error {
 			return fmt.Errorf("value %d does not fit into target of type %s", u, rv.Kind().String())
 		}
 		rv.SetUint(u)
+		return nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if (u == 0xffffffffffffffff) || rv.OverflowInt(int64(u)) {
+			return fmt.Errorf("value %d does not fit into target of type %s", u, rv.Kind().String())
+		}
+		rv.SetInt(int64(u))
 		return nil
 	case reflect.Interface:
 		rv.Set(reflect.ValueOf(u))
@@ -485,7 +651,7 @@ func setInt(rv reflect.Value, i int64) error {
 		rv.Set(reflect.ValueOf(i))
 		return nil
 	default:
-		return fmt.Errorf("cannot assign uint into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
+		return fmt.Errorf("cannot assign int into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
 }
 func setFloat32(rv reflect.Value, f float32) error {
@@ -499,7 +665,7 @@ func setFloat32(rv reflect.Value, f float32) error {
 		rv.Set(reflect.ValueOf(f))
 		return nil
 	default:
-		return fmt.Errorf("cannot assign uint into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
+		return fmt.Errorf("cannot assign float32 into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
 }
 func setFloat64(rv reflect.Value, d float64) error {
@@ -513,7 +679,7 @@ func setFloat64(rv reflect.Value, d float64) error {
 		rv.Set(reflect.ValueOf(d))
 		return nil
 	default:
-		return fmt.Errorf("cannot assign uint into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
+		return fmt.Errorf("cannot assign float64 into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
 }
 
