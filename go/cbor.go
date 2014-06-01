@@ -178,47 +178,12 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			}
 		}
 	} else if cborType == cborText {
-		if cborInfo == varFollows {
-			parts := make([]string, 0, 1)
-			subc := []byte{0}
-			for true {
-				_, err = io.ReadFull(dec.rin, subc)
-				if err != nil {
-					log.Printf("error reading next byte for var text")
-					return err
-				}
-				if subc[0] == 0xff {
-					// done
-					joined := strings.Join(parts, "")
-					reflect.Indirect(rv).Set(reflect.ValueOf(joined))
-					return nil
-				} else {
-					var subtext interface{}
-					err = dec.innerDecodeC(reflect.ValueOf(&subtext), subc[0])
-					if err != nil {
-						log.Printf("error decoding subtext")
-						return err
-					}
-					st, ok := subtext.(string)
-					if ok {
-						parts = append(parts, st)
-					} else {
-						return fmt.Errorf("var text sub element not text but %T", subtext)
-					}
-				}
-			}
-		} else {
-			raw := make([]byte, aux)
-			_, err = io.ReadFull(dec.rin, raw)
-			//reflect.Indirect(rv).SetString(string(raw))
-			reflect.Indirect(rv).Set(reflect.ValueOf(string(raw)))
-			 return nil
-		 }
-	 } else if cborType == cborArray {
-		 return dec.decodeArray(rv, cborInfo, aux)
-	 } else if cborType == cborMap {
-		 return dec.decodeMap(rv, cborInfo, aux)
-	 } else if cborType == cborTag {
+		return dec.decodeText(rv, cborInfo, aux)
+	} else if cborType == cborArray {
+		return dec.decodeArray(rv, cborInfo, aux)
+	} else if cborType == cborMap {
+		return dec.decodeMap(rv, cborInfo, aux)
+	} else if cborType == cborTag {
 		 /*var innerOb interface{}*/
 		 ic := []byte{0}
 		 _, err = io.ReadFull(dec.rin, ic)
@@ -284,6 +249,46 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 
 	
 	return err
+}
+
+func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) error {
+	var err error
+	if cborInfo == varFollows {
+		parts := make([]string, 0, 1)
+		subc := []byte{0}
+		for true {
+			_, err = io.ReadFull(dec.rin, subc)
+			if err != nil {
+				log.Printf("error reading next byte for var text")
+				return err
+			}
+			if subc[0] == 0xff {
+				// done
+				joined := strings.Join(parts, "")
+				reflect.Indirect(rv).Set(reflect.ValueOf(joined))
+				return nil
+			} else {
+				var subtext interface{}
+				err = dec.innerDecodeC(reflect.ValueOf(&subtext), subc[0])
+				if err != nil {
+					log.Printf("error decoding subtext")
+					return err
+				}
+				st, ok := subtext.(string)
+				if ok {
+					parts = append(parts, st)
+				} else {
+					return fmt.Errorf("var text sub element not text but %T", subtext)
+				}
+			}
+		}
+	} else {
+		raw := make([]byte, aux)
+		_, err = io.ReadFull(dec.rin, raw)
+		reflect.Indirect(rv).Set(reflect.ValueOf(string(raw)))
+		return nil
+	}
+	return errors.New("internal error in decodeText, shouldn't get here")
 }
 
 type MapAssignable interface {
@@ -400,6 +405,7 @@ func (dec *Decoder) setMapKV(krv reflect.Value, ma MapAssignable) error {
 
 
 func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error {
+	//log.Print("decode map into   ", rv.Type().String())
 	// dereferenced reflect value
 	var drv reflect.Value
 	if rv.Kind() == reflect.Ptr {
@@ -407,35 +413,28 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 	} else {
 		drv = rv
 	}
+	//log.Print("decode map into d ", drv.Type().String())
 
 	// inner reflect value
 	var irv reflect.Value
 	var ma MapAssignable
 
 	var keyType reflect.Type
-	//var valType reflect.Type
 
 	switch drv.Kind() {
 	case reflect.Interface:
+		//log.Print("decode map into interface ", drv.Type().String())
 		// TODO: maybe I should make this map[string]interface{}
 		nob := make(map[interface{}]interface{})
 		irv = reflect.ValueOf(nob)
 		ma = &MapReflectValue{irv}
 		keyType = irv.Type().Key()
-		//valType = irv.Type().Elem()
 	case reflect.Struct:
-		/*
-		ft := drv.Type()
-		numFields := ft.NumField()
-		for i := 0; i < numFields; i++ {
-			sf := ft.Field(i)
-			//log.Printf("field[%d] %#v %s", i, sf.Name, sf.Type)
-		}
-*/
+		//log.Print("decode map into struct ", drv.Type().String())
 		ma = &StructAssigner{drv}
 		keyType = reflect.TypeOf("")
 	case reflect.Map:
-		//log.Printf("decode into %s", drv.Type().String())
+		//log.Print("decode map into map ", drv.Type().String())
 		if drv.IsNil() {
 			if drv.CanSet() {
 				drv.Set(reflect.MakeMap(drv.Type()))

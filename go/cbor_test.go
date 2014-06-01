@@ -195,7 +195,9 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 
 
 func TestDecodeVectors(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
+
+	t.Log("test standard decode vectors")
 	they, err := readVectors(t)
 	if err != nil {
 		t.Fatal("could not load test vectors:", err)
@@ -275,6 +277,10 @@ const (
 	reflexObOneCborB64 = "p2dhc3RyaW5na2FzdHJpbmcgdmFsamZzdHJpbnRtYXCiYWENYWIOZWdib29s9GRiaW50OCBpZWludGFycmF5gwECA2VjdWludBgqZmRmbG9hdPs/0AAAAAAAAA=="
 )
 
+var referenceObOne RefTestOb = RefTestOb{
+	"astring val", -33, 42, 0.25, []int{1,2,3},
+	map[string]int{"a":13, "b": 14}, false}
+
 /*
 #python
 import json
@@ -286,7 +292,8 @@ print base64.b64encode(cbor.dumps(json.loads(jsonstr)))
 */
 
 func TestDecodeReflectivelyOne(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
+	t.Log("test decode reflectively one")
 
 	var err error
 	
@@ -325,7 +332,15 @@ func TestDecodeReflectivelyOne(t *testing.T) {
 func objectSerializedObject(t *testing.T, ob interface{}) {
 	out := reflect.Indirect(reflect.New(reflect.TypeOf(ob))).Interface()
 	//t.Logf("oso ob T %T %#v, out T %T %#v", ob, ob, out, out)
-
+	objectSerializedTargetObject(t, ob, &out)
+	if !jeq(ob, out, t) {
+		//
+		t.Errorf("%#v != %#v", ob, out)
+	}
+}
+func objectSerializedTargetObject(t *testing.T, ob interface{}, out interface{}) {
+	t.Logf("oso ob T %T %#v", ob, ob)
+	t.Logf("   out T %T %#v", out, out)
 	//scratch := make([]byte, 0)
 	//writeTarget := bytes.NewBuffer(scratch)
 	writeTarget := &bytes.Buffer{}
@@ -338,23 +353,20 @@ func objectSerializedObject(t *testing.T, ob interface{}) {
 
 	scratch := writeTarget.Bytes()
 	dec := NewDecoder(bytes.NewReader(scratch))
-	err = dec.Decode(&out)
+	err = dec.Decode(out)
 
-	t.Logf("oso ob T %T %#v, out T %T %#v", ob, ob, out, out)
+	t.Logf("oso ob T %T %#v", ob, ob)
+	t.Logf("   out T %T %#v", out, out)
 
+	t.Log(hex.EncodeToString(scratch))
 	if err != nil {
-		t.Log(scratch)
 		t.Errorf("failed on decode: %s", err)
 		return
-	}
-
-	if !jeq(ob, out, t) {
-		t.Log(hex.EncodeToString(scratch))
-		t.Errorf("%#v != %#v", ob, out)
 	}
 }
 
 func TestOSO(t *testing.T) {
+	t.Log("test OSO")
 	objectSerializedObject(t, 0)
 	objectSerializedObject(t, 1)
 	objectSerializedObject(t, 2)
@@ -370,4 +382,12 @@ func TestOSO(t *testing.T) {
 	objectSerializedObject(t, []byte{1,3,2})
 	//objectSerializedObject(t, RefTestOb{"hi", -1000, 137, 0.5, nil, nil, true})
 //	objectSerializedObject(t, )
+}
+
+
+func TestHard(t *testing.T) {
+	t.Log("test hard")
+	trto := RefTestOb{}
+	objectSerializedTargetObject(t, referenceObOne, &trto)
+	checkObOne(trto, t)
 }
