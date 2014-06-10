@@ -385,9 +385,43 @@ func TestOSO(t *testing.T) {
 }
 
 
-func TestHard(t *testing.T) {
+func TestRefStruct(t *testing.T) {
 	t.Log("test hard")
 	trto := RefTestOb{}
 	objectSerializedTargetObject(t, referenceObOne, &trto)
 	checkObOne(trto, t)
+}
+
+
+func TestArrays(t *testing.T) {
+	t.Log("test arrays")
+	
+	// okay, sooo, slices
+	ia := []int{1,2,3}
+	tia := []int{}
+	objectSerializedTargetObject(t, ia, &tia)
+	if ! reflect.DeepEqual(ia, tia) {
+		t.Errorf("int array %#v != %#v", ia, tia)
+	}
+
+	// actual arrays
+	xa := [3]int{4,5,6}
+	txa := [3]int{}
+	objectSerializedTargetObject(t, xa, &txa)
+	if ! reflect.DeepEqual(xa, txa) {
+		t.Errorf("int array %#v != %#v", xa, txa)
+	}
+	
+	oa := [3]interface{}{"hi", 2, -3.14}
+	toa := [3]interface{}{}
+	objectSerializedTargetObject(t, oa, &toa)
+	if toa[0] != "hi" {
+		t.Errorf("[3]interface{} [0] wanted \"hi\" got %#v", toa[0])
+	}
+	if toa[1] != uint64(2) {
+		t.Errorf("[3]interface{} [0] wanted 2 got %#v", toa[1])
+	}
+	if toa[2] != -3.14 {
+		t.Errorf("[3]interface{} [0] wanted -3.14 got %#v", toa[2])
+	}
 }
