@@ -178,47 +178,12 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			}
 		}
 	} else if cborType == cborText {
-		if cborInfo == varFollows {
-			parts := make([]string, 0, 1)
-			subc := []byte{0}
-			for true {
-				_, err = io.ReadFull(dec.rin, subc)
-				if err != nil {
-					log.Printf("error reading next byte for var text")
-					return err
-				}
-				if subc[0] == 0xff {
-					// done
-					joined := strings.Join(parts, "")
-					reflect.Indirect(rv).Set(reflect.ValueOf(joined))
-					return nil
-				} else {
-					var subtext interface{}
-					err = dec.innerDecodeC(reflect.ValueOf(&subtext), subc[0])
-					if err != nil {
-						log.Printf("error decoding subtext")
-						return err
-					}
-					st, ok := subtext.(string)
-					if ok {
-						parts = append(parts, st)
-					} else {
-						return fmt.Errorf("var text sub element not text but %T", subtext)
-					}
-				}
-			}
-		} else {
-			raw := make([]byte, aux)
-			_, err = io.ReadFull(dec.rin, raw)
-			//reflect.Indirect(rv).SetString(string(raw))
-			reflect.Indirect(rv).Set(reflect.ValueOf(string(raw)))
-			 return nil
-		 }
-	 } else if cborType == cborArray {
-		 return dec.decodeArray(rv, cborInfo, aux)
-	 } else if cborType == cborMap {
-		 return dec.decodeMap(rv, cborInfo, aux)
-	 } else if cborType == cborTag {
+		return dec.decodeText(rv, cborInfo, aux)
+	} else if cborType == cborArray {
+		return dec.decodeArray(rv, cborInfo, aux)
+	} else if cborType == cborMap {
+		return dec.decodeMap(rv, cborInfo, aux)
+	} else if cborType == cborTag {
 		 /*var innerOb interface{}*/
 		 ic := []byte{0}
 		 _, err = io.ReadFull(dec.rin, ic)
@@ -284,6 +249,46 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 
 	
 	return err
+}
+
+func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) error {
+	var err error
+	if cborInfo == varFollows {
+		parts := make([]string, 0, 1)
+		subc := []byte{0}
+		for true {
+			_, err = io.ReadFull(dec.rin, subc)
+			if err != nil {
+				log.Printf("error reading next byte for var text")
+				return err
+			}
+			if subc[0] == 0xff {
+				// done
+				joined := strings.Join(parts, "")
+				reflect.Indirect(rv).Set(reflect.ValueOf(joined))
+				return nil
+			} else {
+				var subtext interface{}
+				err = dec.innerDecodeC(reflect.ValueOf(&subtext), subc[0])
+				if err != nil {
+					log.Printf("error decoding subtext")
+					return err
+				}
+				st, ok := subtext.(string)
+				if ok {
+					parts = append(parts, st)
+				} else {
+					return fmt.Errorf("var text sub element not text but %T", subtext)
+				}
+			}
+		}
+	} else {
+		raw := make([]byte, aux)
+		_, err = io.ReadFull(dec.rin, raw)
+		reflect.Indirect(rv).Set(reflect.ValueOf(string(raw)))
+		return nil
+	}
+	return errors.New("internal error in decodeText, shouldn't get here")
 }
 
 type MapAssignable interface {
@@ -400,6 +405,7 @@ func (dec *Decoder) setMapKV(krv reflect.Value, ma MapAssignable) error {
 
 
 func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error {
+	//log.Print("decode map into   ", rv.Type().String())
 	// dereferenced reflect value
 	var drv reflect.Value
 	if rv.Kind() == reflect.Ptr {
@@ -407,35 +413,28 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 	} else {
 		drv = rv
 	}
+	//log.Print("decode map into d ", drv.Type().String())
 
 	// inner reflect value
 	var irv reflect.Value
 	var ma MapAssignable
 
 	var keyType reflect.Type
-	//var valType reflect.Type
 
 	switch drv.Kind() {
 	case reflect.Interface:
+		//log.Print("decode map into interface ", drv.Type().String())
 		// TODO: maybe I should make this map[string]interface{}
 		nob := make(map[interface{}]interface{})
 		irv = reflect.ValueOf(nob)
 		ma = &MapReflectValue{irv}
 		keyType = irv.Type().Key()
-		//valType = irv.Type().Elem()
 	case reflect.Struct:
-		/*
-		ft := drv.Type()
-		numFields := ft.NumField()
-		for i := 0; i < numFields; i++ {
-			sf := ft.Field(i)
-			//log.Printf("field[%d] %#v %s", i, sf.Name, sf.Type)
-		}
-*/
+		//log.Print("decode map into struct ", drv.Type().String())
 		ma = &StructAssigner{drv}
 		keyType = reflect.TypeOf("")
 	case reflect.Map:
-		//log.Printf("decode into %s", drv.Type().String())
+		//log.Print("decode map into map ", drv.Type().String())
 		if drv.IsNil() {
 			if drv.CanSet() {
 				drv.Set(reflect.MakeMap(drv.Type()))
@@ -517,21 +516,28 @@ func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) err
 
 	// inner reflect value
 	var irv reflect.Value
+	var elemType reflect.Type
 
 	switch rv.Kind() {
 	case reflect.Interface:
+		// make a slice
 		nob := make([]interface{}, 0, makeLength)
 		irv = reflect.ValueOf(nob)
+		elemType = irv.Type().Elem()
 	case reflect.Slice:
+		// we have a slice
 		irv = rv
+		elemType = irv.Type().Elem()
+	case reflect.Array:
+		// no irv, no elemType
 	default:
 		return fmt.Errorf("can't read array into %s", rv.Type().String())
 	}
 
-	elemType := irv.Type().Elem()
 	var err error
 
 	if cborInfo == varFollows {
+		var arrayPos int = 0
 		//log.Printf("var array")
 		subc := []byte{0}
 		for true {
@@ -543,6 +549,13 @@ func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) err
 			if subc[0] == 0xff {
 				// Done
 				break
+			} else if rv.Kind() == reflect.Array {
+				err := dec.innerDecodeC(rv.Index(arrayPos), subc[0])
+				if err != nil {
+					log.Printf("error decoding array subob")
+					return err
+				}
+				arrayPos++
 			} else {
 				subrv := reflect.New(elemType)
 				err := dec.innerDecodeC(subrv, subc[0])
@@ -556,17 +569,27 @@ func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) err
 	} else {
 		var i uint64
 		for i = 0; i < aux; i++ {
-			subrv := reflect.New(elemType)
-			err := dec.reflectDecode(subrv)
-			if err != nil {
-				log.Printf("error decoding array subob")
-				return err
+			if rv.Kind() == reflect.Array {
+				err := dec.reflectDecode(rv.Index(int(i)))
+				if err != nil {
+					log.Printf("error decoding array subob")
+					return err
+				}
+			} else {
+				subrv := reflect.New(elemType)
+				err := dec.reflectDecode(subrv)
+				if err != nil {
+					log.Printf("error decoding array subob")
+					return err
+				}
+				irv = reflect.Append(irv, reflect.Indirect(subrv))
 			}
-			irv = reflect.Append(irv, reflect.Indirect(subrv))
 		}
 	}
 
-	rv.Set(irv)
+	if rv.Kind() != reflect.Array {
+		rv.Set(irv)
+	}
 
 	return nil
 }
@@ -815,7 +838,7 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 		return enc.writeBool(rv.Bool())
 	case reflect.String:
 		return enc.writeText(rv.String())
-	case reflect.Slice:
+	case reflect.Slice, reflect.Array:
 		elemType := rv.Type().Elem()
 		if elemType.Kind() == reflect.Uint8 {
 			// special case, write out []byte
@@ -826,6 +849,7 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 		for i := 0; i < alen; i++ {
 			err = enc.writeReflection(rv.Index(i))
 			if err != nil {
+				log.Printf("error at array elem %d", i)
 				return err
 			}
 		}
@@ -837,10 +861,12 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 			vrv := rv.MapIndex(krv)
 			err = enc.writeReflection(krv)
 			if err != nil {
+				log.Printf("error encoding map key")
 				return err
 			}
 			err = enc.writeReflection(vrv)
 			if err != nil {
+				log.Printf("error encoding map val")
 				return err
 			}
 		}
@@ -865,6 +891,9 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 			}
 		}
 		return nil
+	case reflect.Interface:
+		//return fmt.Errorf("TODO: serialize interface{} k=%s T=%s", rv.Kind().String(), rv.Type().String())
+		return enc.Write(rv.Interface())
 	case reflect.Ptr:
 		if rv.IsNil() {
 			return enc.tagAuxOut(cbor7, uint64(cborNull))
@@ -872,7 +901,7 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 		return enc.writeReflection(reflect.Indirect(rv))
 	}
 
-	return fmt.Errorf("don't know how to CBOR serialize %T", rv.Type().String())
+	return fmt.Errorf("don't know how to CBOR serialize k=%s t=%s", rv.Kind().String(), rv.Type().String())
 }
 
 func (enc *Encoder) writeInt(x int64) error {
