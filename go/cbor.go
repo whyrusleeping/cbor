@@ -160,7 +160,7 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 		}
 		return setInt(rv, -1 - int64(aux))
 	} else if cborType == cborBytes {
-		log.Printf("cborType %x bytes cborInfo %d aux %x", cborType, cborInfo, aux)
+		//log.Printf("cborType %x bytes cborInfo %d aux %x", cborType, cborInfo, aux)
 		if cborInfo == varFollows {
 			return errors.New("TODO: implement var bytes")
 		} else {
@@ -243,7 +243,7 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 		 } else if cborInfo == cborTrue {
 			 reflect.Indirect(rv).Set(reflect.ValueOf(true))
 		 } else if cborInfo == cborNull {
-			 rv.Set(reflect.Zero(rv.Type()))
+			 return setNil(rv)
 		 }
 	 }
 
@@ -316,6 +316,18 @@ func (irv *MapReflectValue) SetReflectValueForKey(key interface{}, value reflect
 	vrv := reflect.Indirect(value)
 	//log.Printf("irv T %s v %#v", irv.Type().String(), irv.Interface())
 	//log.Printf("k T %s v %#v, v T %s v %#v", krv.Type().String(), krv.Interface(), vrv.Type().String(), vrv.Interface())
+	if krv.Kind() == reflect.Interface {
+		krv = krv.Elem()
+		//log.Printf("ke T %s v %#v", krv.Type().String(), krv.Interface())
+	}
+	if (krv.Kind() == reflect.Slice) || (krv.Kind() == reflect.Array) {
+		//log.Printf("key is slice or array")
+		if krv.Type().Elem().Kind() == reflect.Uint8 {
+			//log.Printf("key is []uint8")
+			ks := string(krv.Bytes())
+			krv = reflect.ValueOf(ks)
+		}
+	}
 	irv.SetMapIndex(krv, vrv)
 	return nil
 }
@@ -740,6 +752,22 @@ func setFloat64(rv reflect.Value, d float64) error {
 	default:
 		return fmt.Errorf("cannot assign float64 into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
+}
+func setNil(rv reflect.Value) error {
+	switch rv.Kind() {
+	case reflect.Ptr:
+		return setNil(reflect.Indirect(rv))
+	case reflect.Interface:
+		if rv.IsNil() {
+			// already nil, okay!
+			return nil
+		}
+		rv.Set(reflect.Zero(rv.Type()))
+	default:
+		log.Printf("setNil wat %s", rv.Type())
+		rv.Set(reflect.Zero(rv.Type()))
+	}
+	return nil
 }
 
 
