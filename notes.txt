@@ -15,3 +15,5 @@ http://cbor.io/
 https://github.com/cbor/test-vectors/
 
 git clone https://github.com/cbor/test-vectors/
+
+go install code.google.com/p/cbor/go
