@@ -425,3 +425,107 @@ func TestArrays(t *testing.T) {
 		t.Errorf("[3]interface{} [0] wanted -3.14 got %#v", toa[2])
 	}
 }
+
+type TaggedStruct struct {
+	One string `json:"m_one_s"`
+	Two int `json:"bunnies,omitempty"`
+	Three float64 `json:"htree_json" cbor:"three_cbor"`
+}
+
+func PracticalInt64(xi interface{}) (int64, bool) {
+	switch i := xi.(type) {
+	//case int, int8, int16, int32, int64, uint8, uint16, uint32:
+		//oi, ok := i.(int64)
+		//return oi, ok
+	case int:
+		return int64(i), true
+	case int64:
+		return int64(i), true
+	case uint64:
+		if i < 0x7fffffffffffffff {
+			return int64(i), true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+func ms(d map[string]interface{}, k string, t *testing.T) (string, bool) {
+	if d == nil {
+		t.Error("nil map")
+		return "", false
+	}
+	ob, ok := d[k]
+	if !ok {
+		t.Errorf("map missing key %v", k)
+		return "", false
+	}
+	xs, ok := ob.(string)
+	return xs, ok
+}
+// I wish go had templates!
+func mi(d map[string]interface{}, k string, t *testing.T) (int64, bool) {
+	if d == nil {
+		t.Error("nil map")
+		return 0, false
+	}
+	ob, ok := d[k]
+	if !ok {
+		t.Errorf("map missing key %v", k)
+		return 0, false
+	}
+	//xs, ok := ob.(int)
+	xs, ok := PracticalInt64(ob)
+	return xs, ok
+}
+func mf64(d map[string]interface{}, k string, t *testing.T) (float64, bool) {
+	if d == nil {
+		t.Error("nil map")
+		return 0, false
+	}
+	ob, ok := d[k]
+	if !ok {
+		t.Errorf("map missing key %v", k)
+		return 0, false
+	}
+	xs, ok := ob.(float64)
+	return xs, ok
+}
+
+func TestStructTags(t *testing.T) {
+	t.Log("StructTags")
+	
+	ob := TaggedStruct{"hello", 42, 6.28}
+	
+	blob, err := Dumps(ob)
+	if err != nil {
+		t.Error(err)
+	}
+
+	mapo := make(map[string]interface{})
+	err = Loads(blob, &mapo)
+	if err != nil {
+		t.Error(err)
+	}
+	xs, ok := ms(mapo, "m_one_s", t)
+	if (!ok) || (xs != "hello") {
+		t.Errorf("failed to get m_one_s from %#v", mapo)
+	}
+	xi, ok := mi(mapo, "bunnies", t)
+	if (!ok) || (xi != 42) {
+		t.Errorf("failed to get bunnies from %#v", mapo)
+	}
+	xf, ok := mf64(mapo, "three_cbor", t)
+	if (!ok) || (xf != 6.28) {
+		t.Errorf("failed to get three_cbor from %#v", mapo)
+	}
+
+	ob2 := TaggedStruct{}
+	err = Loads(blob, &ob2)
+	if err != nil {
+		t.Error(err)
+	}
+	if ob != ob2 {
+		t.Errorf("a!=b %#v != %#v", ob, ob2)
+	}
+}

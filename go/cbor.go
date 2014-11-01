@@ -4,6 +4,7 @@
 package cbor
 
 
+import "bytes"
 import "errors"
 import "fmt"
 import "io"
@@ -47,6 +48,12 @@ var tagDecimal uint64 = 4
 var tagBigfloat uint64 = 5
 
 // TODO: honor encoding.BinaryMarshaler interface and encapsulate blob returned from that.
+
+// Load one object into v
+func Loads(blob []byte, v interface{}) error {
+	dec := NewDecoder(bytes.NewReader(blob))
+	return dec.Decode(v)
+}
 
 type Decoder struct {
 	rin io.Reader
@@ -340,6 +347,7 @@ type StructAssigner struct {
 }
 
 func (sa *StructAssigner) SetKeyValue(key, value interface{}) {
+	// TODO: DELETE, dead code, unused.
 	skey, ok := key.(string)
 	if ! ok {
 		log.Printf("skv key is not string, got %T", key)
@@ -350,12 +358,14 @@ func (sa *StructAssigner) SetKeyValue(key, value interface{}) {
 	numFields := ft.NumField()
 	for i := 0; i < numFields; i++ {
 		sf := ft.Field(i)
-		if (sf.Name == skey) || strings.EqualFold(sf.Name, skey) {
+		fieldname := fieldname(sf)
+		log.Printf("field[%d] (\"%s\") %#v %s", i, fieldname, sf.Name, sf.Type)
+		if (fieldname == skey) || strings.EqualFold(fieldname, skey) {
 			sa.Srv.FieldByName(sf.Name).Set(reflect.ValueOf(value))
 			return
 		}
-		//log.Printf("field[%d] %#v %s", i, sf.Name, sf.Type)
 	}
+	log.Print("StructAssigner set nothing!")
 }
 
 func (sa *StructAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
@@ -374,7 +384,8 @@ func (sa *StructAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, b
 	numFields := ft.NumField()
 	for i := 0; i < numFields; i++ {
 		sf := ft.Field(i)
-		if (sf.Name == skey) || strings.EqualFold(sf.Name, skey) {
+		fieldname := fieldname(sf)
+		if (fieldname == skey) || strings.EqualFold(fieldname, skey) {
 			fieldVal := sa.Srv.FieldByName(sf.Name)
 			if !fieldVal.CanSet() {
 				log.Printf("cannot set field %s", sf.Name)
@@ -802,16 +813,58 @@ type Encoder struct {
 	scratch []byte
 }
 
-func Encode(out io.Writer, ob interface{}) error {
-	return NewEncoder(out).Write(ob)
+// parse StructField.Tag.Get("json" or "cbor")
+func fieldTagName(xinfo string) (string, bool) {
+	if len(xinfo) != 0 {
+		// e.g. `json:"field_name,omitempty"`, or same for cbor
+		jiparts := strings.Split(xinfo, ",")
+		if len(jiparts) > 0 {
+			fieldName := jiparts[0]
+			if len(fieldName) > 0 {
+				return fieldName, true
+			}
+		}
+	}
+	return "", false
 }
 
+func fieldname(fieldinfo reflect.StructField) string {
+	fieldname, ok := fieldTagName(fieldinfo.Tag.Get("cbor"))
+	if ok {
+		return fieldname
+	}
+	fieldname, ok = fieldTagName(fieldinfo.Tag.Get("json"))
+	if ok {
+		return fieldname
+	}
+	return fieldinfo.Name
+}
+
+// Write out an object to an io.Writer
+func Encode(out io.Writer, ob interface{}) error {
+	return NewEncoder(out).Encode(ob)
+}
+
+// Write out an object to a new byte slice
+func Dumps(ob interface{}) ([]byte, error) {
+	writeTarget := &bytes.Buffer{}
+	writeTarget.Grow(20000)
+	err := Encode(writeTarget, ob)
+	if err != nil {
+		return nil, err
+	}
+	return writeTarget.Bytes(), nil
+}
+
+// Return new Encoder object for writing to supplied io.Writer.
+//
+// TODO: set options on Encoder object.
 func NewEncoder(out io.Writer) *Encoder {
 	return &Encoder{out, make([]byte, 9)}
 }
 
 
-func (enc *Encoder) Write(ob interface{}) error {
+func (enc *Encoder) Encode(ob interface{}) error {
 	switch x := ob.(type) {
 	case int:
 		return enc.writeInt(int64(x))
@@ -909,7 +962,8 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 		}
 		for i := 0; i < numfields; i++ {
 			fieldinfo := structType.Field(i)
-			err = enc.writeText(fieldinfo.Name)
+			fieldname := fieldname(fieldinfo)
+			err = enc.writeText(fieldname)
 			if err != nil {
 				return err
 			}
@@ -921,7 +975,7 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 		return nil
 	case reflect.Interface:
 		//return fmt.Errorf("TODO: serialize interface{} k=%s T=%s", rv.Kind().String(), rv.Type().String())
-		return enc.Write(rv.Interface())
+		return enc.Encode(rv.Interface())
 	case reflect.Ptr:
 		if rv.IsNil() {
 			return enc.tagAuxOut(cbor7, uint64(cborNull))
