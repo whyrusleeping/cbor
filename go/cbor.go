@@ -298,26 +298,26 @@ func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) erro
 	return errors.New("internal error in decodeText, shouldn't get here")
 }
 
-type MapAssignable interface {
+type mapAssignable interface {
 	SetKeyValue(key, value interface{})
 	ReflectValueForKey(key interface{}) (*reflect.Value, bool)
 	SetReflectValueForKey(key interface{}, value reflect.Value) error
 }
 
-type MapReflectValue struct {
+type mapReflectValue struct {
 	reflect.Value
 }
 
-func (irv *MapReflectValue) SetKeyValue(key, value interface{}) {
+func (irv *mapReflectValue) SetKeyValue(key, value interface{}) {
 	irv.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(value))
 }
-func (irv *MapReflectValue) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
+func (irv *mapReflectValue) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
 	//var x interface{}
 	//rv := reflect.ValueOf(&x)
 	rv := reflect.New(irv.Type().Elem())
 	return &rv, true
 }
-func (irv *MapReflectValue) SetReflectValueForKey(key interface{}, value reflect.Value) error {
+func (irv *mapReflectValue) SetReflectValueForKey(key interface{}, value reflect.Value) error {
 	//log.Printf("k T %T v%#v, v T %s v %#v", key, key, value.Type().String(), value.Interface())
 	krv := reflect.Indirect(reflect.ValueOf(key))
 	vrv := reflect.Indirect(value)
@@ -340,13 +340,13 @@ func (irv *MapReflectValue) SetReflectValueForKey(key interface{}, value reflect
 }
 
 
-type StructAssigner struct {
+type structAssigner struct {
 	Srv reflect.Value
 
 	//keyType reflect.Type
 }
 
-func (sa *StructAssigner) SetKeyValue(key, value interface{}) {
+func (sa *structAssigner) SetKeyValue(key, value interface{}) {
 	// TODO: DELETE, dead code, unused.
 	skey, ok := key.(string)
 	if ! ok {
@@ -365,10 +365,10 @@ func (sa *StructAssigner) SetKeyValue(key, value interface{}) {
 			return
 		}
 	}
-	log.Print("StructAssigner set nothing!")
+	log.Print("structAssigner set nothing!")
 }
 
-func (sa *StructAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
+func (sa *structAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
 	var skey string
 	switch tkey := key.(type) {
 	case string:
@@ -396,12 +396,12 @@ func (sa *StructAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, b
 	}
 	return nil, false
 }
-func (sa *StructAssigner) SetReflectValueForKey(key interface{}, value reflect.Value) error {
+func (sa *structAssigner) SetReflectValueForKey(key interface{}, value reflect.Value) error {
 	return nil
 }
 
 
-func (dec *Decoder) setMapKV(krv reflect.Value, ma MapAssignable) error {
+func (dec *Decoder) setMapKV(krv reflect.Value, ma mapAssignable) error {
 	var err error
 	val, ok := ma.ReflectValueForKey(krv.Interface())
 	if !ok {
@@ -440,7 +440,7 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 
 	// inner reflect value
 	var irv reflect.Value
-	var ma MapAssignable
+	var ma mapAssignable
 
 	var keyType reflect.Type
 
@@ -450,11 +450,11 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 		// TODO: maybe I should make this map[string]interface{}
 		nob := make(map[interface{}]interface{})
 		irv = reflect.ValueOf(nob)
-		ma = &MapReflectValue{irv}
+		ma = &mapReflectValue{irv}
 		keyType = irv.Type().Key()
 	case reflect.Struct:
 		//log.Print("decode map into struct ", drv.Type().String())
-		ma = &StructAssigner{drv}
+		ma = &structAssigner{drv}
 		keyType = reflect.TypeOf("")
 	case reflect.Map:
 		//log.Print("decode map into map ", drv.Type().String())
@@ -466,7 +466,7 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 			}
 		}
 		keyType = drv.Type().Key()
-		ma = &MapReflectValue{drv}
+		ma = &mapReflectValue{drv}
 	default:
 		return fmt.Errorf("can't read map into %s", rv.Type().String())
 	}
