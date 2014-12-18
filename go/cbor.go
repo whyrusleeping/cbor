@@ -299,7 +299,6 @@ func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) erro
 }
 
 type mapAssignable interface {
-	SetKeyValue(key, value interface{})
 	ReflectValueForKey(key interface{}) (*reflect.Value, bool)
 	SetReflectValueForKey(key interface{}, value reflect.Value) error
 }
@@ -308,9 +307,6 @@ type mapReflectValue struct {
 	reflect.Value
 }
 
-func (irv *mapReflectValue) SetKeyValue(key, value interface{}) {
-	irv.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(value))
-}
 func (irv *mapReflectValue) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
 	//var x interface{}
 	//rv := reflect.ValueOf(&x)
@@ -346,28 +342,6 @@ type structAssigner struct {
 	//keyType reflect.Type
 }
 
-func (sa *structAssigner) SetKeyValue(key, value interface{}) {
-	// TODO: DELETE, dead code, unused.
-	skey, ok := key.(string)
-	if ! ok {
-		log.Printf("skv key is not string, got %T", key)
-		return
-	}
-
-	ft := sa.Srv.Type()
-	numFields := ft.NumField()
-	for i := 0; i < numFields; i++ {
-		sf := ft.Field(i)
-		fieldname := fieldname(sf)
-		log.Printf("field[%d] (\"%s\") %#v %s", i, fieldname, sf.Name, sf.Type)
-		if (fieldname == skey) || strings.EqualFold(fieldname, skey) {
-			sa.Srv.FieldByName(sf.Name).Set(reflect.ValueOf(value))
-			return
-		}
-	}
-	log.Print("structAssigner set nothing!")
-}
-
 func (sa *structAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, bool) {
 	var skey string
 	switch tkey := key.(type) {
@@ -384,11 +358,12 @@ func (sa *structAssigner) ReflectValueForKey(key interface{}) (*reflect.Value, b
 	numFields := ft.NumField()
 	for i := 0; i < numFields; i++ {
 		sf := ft.Field(i)
-		fieldname := fieldname(sf)
+		fieldname, ok := fieldname(sf)
+		if !ok { continue }
 		if (fieldname == skey) || strings.EqualFold(fieldname, skey) {
 			fieldVal := sa.Srv.FieldByName(sf.Name)
 			if !fieldVal.CanSet() {
-				log.Printf("cannot set field %s", sf.Name)
+				log.Printf("cannot set field %s for key %s", sf.Name, skey)
 				return nil, false
 			}
 			return &fieldVal, true
@@ -817,6 +792,7 @@ type Encoder struct {
 func fieldTagName(xinfo string) (string, bool) {
 	if len(xinfo) != 0 {
 		// e.g. `json:"field_name,omitempty"`, or same for cbor
+		// TODO: honor 'omitempty' option
 		jiparts := strings.Split(xinfo, ",")
 		if len(jiparts) > 0 {
 			fieldName := jiparts[0]
@@ -828,16 +804,26 @@ func fieldTagName(xinfo string) (string, bool) {
 	return "", false
 }
 
-func fieldname(fieldinfo reflect.StructField) string {
+// Return fieldname, bool; if bool is false, don't use this field
+func fieldname(fieldinfo reflect.StructField) (string, bool) {
+	if fieldinfo.PkgPath != "" {
+		// has path to private package. don't export
+		return "", false
+	}
 	fieldname, ok := fieldTagName(fieldinfo.Tag.Get("cbor"))
-	if ok {
-		return fieldname
+	if !ok {
+		fieldname, ok = fieldTagName(fieldinfo.Tag.Get("json"))
 	}
-	fieldname, ok = fieldTagName(fieldinfo.Tag.Get("json"))
 	if ok {
-		return fieldname
+		if fieldname == "" {
+			return fieldinfo.Name, true
+		}
+		if fieldname == "-" {
+			return "", false
+		}
+		return fieldname, true
 	}
-	return fieldinfo.Name
+	return fieldinfo.Name, true
 }
 
 // Write out an object to an io.Writer
@@ -956,13 +942,21 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 		// TODO: check for big.Int ?
 		numfields := rv.NumField()
 		structType := rv.Type()
-		err = enc.tagAuxOut(cborMap, uint64(numfields))
+		usableFields := 0
+		for i := 0; i < numfields; i++ {
+			fieldinfo := structType.Field(i)
+			_, ok := fieldname(fieldinfo)
+			if !ok { continue }
+			usableFields++
+		}
+		err = enc.tagAuxOut(cborMap, uint64(usableFields))
 		if err != nil {
 			return err
 		}
 		for i := 0; i < numfields; i++ {
 			fieldinfo := structType.Field(i)
-			fieldname := fieldname(fieldinfo)
+			fieldname, ok := fieldname(fieldinfo)
+			if !ok { continue }
 			err = enc.writeText(fieldname)
 			if err != nil {
 				return err

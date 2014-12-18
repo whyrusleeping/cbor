@@ -249,6 +249,12 @@ type RefTestOb struct {
 	GBool bool
 }
 
+type privateTestOb struct {
+	privateInt int
+	PubInt int
+	PubSkip int `cbor:"-"`
+}
+
 
 func checkObOne(ob RefTestOb, t *testing.T) bool {
 	ok := true
@@ -326,6 +332,56 @@ func TestDecodeReflectivelyOne(t *testing.T) {
 	t.Log("check cbor")
 	if !checkObOne(they, t) {
 		return
+	}
+}
+
+func TestEncodeWithPrivate(t *testing.T) {
+	//t.Parallel()
+	t.Log("test encode with private")
+
+	var err error
+	ob := privateTestOb{1,2,3}
+
+	writeTarget := &bytes.Buffer{}
+	writeTarget.Grow(20000)
+	err = Encode(writeTarget, ob)
+	if err != nil {
+		t.Errorf("failed on encode: %s", err)
+		return
+	}
+
+	{
+		destmap := make(map[string]interface{})
+		scratch := writeTarget.Bytes()
+		dec := NewDecoder(bytes.NewReader(scratch))
+		err = dec.Decode(&destmap)
+		if err != nil {
+			t.Errorf("failed on decode: %s", err)
+			return
+		}
+		pi, ok := destmap["privateInt"]
+		if ok {
+			t.Errorf("destmap shouldn't have privateInt %v: %#v", pi, destmap)
+		}
+		pubskip, ok := destmap["PubSkip"]
+		if ok {
+			t.Errorf("destmap shouldn't have PubSkip %v: %#v", pubskip, destmap)
+		}
+	}
+
+	xo := privateTestOb{-1,-1,-1}
+	scratch := writeTarget.Bytes()
+	dec := NewDecoder(bytes.NewReader(scratch))
+	err = dec.Decode(&xo)
+	if err != nil {
+		t.Errorf("failed on decode: %s", err)
+		return
+	}
+	if xo.privateInt != -1 {
+		t.Errorf("privateInt is %d, wanted -1", xo.privateInt)
+	}
+	if xo.PubSkip != -1 {
+		t.Errorf("PubSkip is %d, wanted -1", xo.PubSkip)
 	}
 }
 
