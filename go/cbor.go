@@ -169,7 +169,42 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 	} else if cborType == cborBytes {
 		//log.Printf("cborType %x bytes cborInfo %d aux %x", cborType, cborInfo, aux)
 		if cborInfo == varFollows {
-			return errors.New("TODO: implement var bytes")
+			parts := make([][]byte, 0, 1)
+			allsize := 0
+			subc := []byte{0}
+			for true {
+				_, err = io.ReadFull(dec.rin, subc)
+				if err != nil {
+					log.Printf("error reading next byte for bar bytes")
+					return err
+				}
+				if subc[0] == 0xff {
+					// done
+					var out []byte = nil
+					if len(parts) == 0 {
+						out = make([]byte,0)
+					} else {
+						pos := 0
+						out = make([]byte,allsize)
+						for _, p := range(parts) {
+							pos += copy(out[pos:], p)
+						}
+					}
+					return setBytes(rv, out)
+				} else {
+					var subb []byte = nil
+					if (subc[0] & typeMask) != cborBytes {
+						return fmt.Errorf("sub of var bytes is type %x, wanted %x", subc[0], cborBytes)
+					}
+					err = dec.innerDecodeC(reflect.ValueOf(&subb), subc[0])
+					if err != nil {
+						log.Printf("error decoding sub bytes")
+						return err
+					}
+					allsize += len(subb)
+					parts = append(parts, subb)
+				}
+			}
 		} else {
 			val := make([]byte, aux)
 			_, err = io.ReadFull(dec.rin, val)
@@ -178,11 +213,11 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			}
 			// Don't really care about count, ReadFull will make it all or none and we can just fall out with whatever error
 			return setBytes(rv, val)
-			if (rv.Kind() == reflect.Slice) && (rv.Type().Elem().Kind() == reflect.Uint8) {
+			/*if (rv.Kind() == reflect.Slice) && (rv.Type().Elem().Kind() == reflect.Uint8) {
 				rv.SetBytes(val)
 			} else {
 				return fmt.Errorf("cannot write []byte to k=%s %s", rv.Kind().String(), rv.Type().String())
-			}
+			}*/
 		}
 	} else if cborType == cborText {
 		return dec.decodeText(rv, cborInfo, aux)
@@ -666,6 +701,9 @@ func setBytes(rv reflect.Value, buf []byte) error {
 		} else {
 			return fmt.Errorf("cannot write []byte to k=%s %s", rv.Kind().String(), rv.Type().String())
 		}
+	case reflect.String:
+		rv.Set(reflect.ValueOf(string(buf)))
+		return nil
 	default:
 		return fmt.Errorf("cannot assign []byte into Kind=%s Type=%s %#v", rv.Kind().String(), rv.Type().String(), rv)
 	}
