@@ -723,6 +723,14 @@ func setBytes(rv reflect.Value, buf []byte) error {
 func setUint(rv reflect.Value, u uint64) error {
 	switch rv.Kind() {
 	case reflect.Ptr:
+		if rv.IsNil() {
+			if rv.CanSet() {
+				rv.Set(reflect.New(rv.Type().Elem()))
+				// fall through to set indirect below
+			} else {
+				return fmt.Errorf("trying to put uint into unsettable nil ptr")
+			}
+		}
 		return setUint(reflect.Indirect(rv), u)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if rv.OverflowUint(u) {
