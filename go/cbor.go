@@ -307,7 +307,8 @@ func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) erro
 			if subc[0] == 0xff {
 				// done
 				joined := strings.Join(parts, "")
-				reflect.Indirect(rv).Set(reflect.ValueOf(joined))
+				dtStringSet(rv, joined)
+				//reflect.Indirect(rv).Set(reflect.ValueOf(joined))
 				return nil
 			} else {
 				var subtext interface{}
@@ -327,10 +328,20 @@ func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) erro
 	} else {
 		raw := make([]byte, aux)
 		_, err = io.ReadFull(dec.rin, raw)
-		reflect.Indirect(rv).Set(reflect.ValueOf(string(raw)))
+		xs := string(raw)
+		dtStringSet(rv, xs)
 		return nil
 	}
 	return errors.New("internal error in decodeText, shouldn't get here")
+}
+func dtStringSet(rv reflect.Value, xs string) {
+	// handle either concrete string or string* to nil
+	deref := reflect.Indirect(rv)
+	if !deref.CanSet() {
+		rv.Set(reflect.ValueOf(&xs))
+	} else {
+		deref.Set(reflect.ValueOf(xs))
+	}
 }
 
 type mapAssignable interface {
@@ -500,7 +511,7 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 				//var val interface{}
 				err = dec.innerDecodeC(krv, subc[0])
 				if err != nil {
-					log.Printf("error decoding map key")
+					log.Printf("error decoding map key V, %s", err)
 					return err
 				}
 
@@ -519,7 +530,7 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 			//err = dec.Decode(&key)
 			err = dec.reflectDecode(krv)
 			if err != nil {
-				log.Printf("error decoding map key")
+				log.Printf("error decoding map key #, %s", err)
 				return err
 			}
 			err = dec.setMapKV(krv, ma)
@@ -780,7 +791,8 @@ func setFloat64(rv reflect.Value, d float64) error {
 func setNil(rv reflect.Value) error {
 	switch rv.Kind() {
 	case reflect.Ptr:
-		return setNil(reflect.Indirect(rv))
+		//return setNil(reflect.Indirect(rv))
+		rv.Set(reflect.Zero(rv.Type()))
 	case reflect.Interface:
 		if rv.IsNil() {
 			// already nil, okay!
