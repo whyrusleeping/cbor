@@ -55,6 +55,24 @@ func Loads(blob []byte, v interface{}) error {
 	return dec.Decode(v)
 }
 
+type TagDecoder interface {
+	// Handle things which match this.
+	//
+	// Setup like this:
+	// var dec Decoder
+	// var myTagDec TagDecoder
+	// dec.TagDecoders[myTagDec.GetTag()] = myTagDec
+	GetTag() uint64
+
+	// Sub-object will be decoded onto the returned object.
+	DecodeTarget() interface{}
+
+	// Run after decode onto DecodeTarget has happened.
+	// The return value from this is returned in place of the
+	// raw decoded object.
+	PostDecode(interface{}) (interface{}, error)
+}
+
 type Decoder struct {
 	rin io.Reader
 
@@ -63,6 +81,9 @@ type Decoder struct {
 
 	// many values fit within the next 8 bytes
 	b8 []byte
+
+	// Extra processing for CBOR TAG objects.
+	TagDecoders map[uint64]TagDecoder
 }
 
 func NewDecoder(r io.Reader) *Decoder {
@@ -70,6 +91,7 @@ func NewDecoder(r io.Reader) *Decoder {
 		r,
 		make([]byte, 1),
 		make([]byte, 8),
+		make(map[uint64]TagDecoder),
 	}
 }
 func (dec *Decoder) Decode(v interface{}) error {
@@ -252,8 +274,30 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 		 } else if aux == tagBigfloat {
 			 log.Printf("TODO: directly read bytes into bigfloat")
 		 } else {
-			 log.Printf("TODO: handle cbor tag: %x", aux)
-			 return dec.innerDecodeC(rv, ic[0])
+			 decoder, ok := dec.TagDecoders[aux]
+			 if ok {
+				 target := decoder.DecodeTarget()
+				 trv := reflect.ValueOf(target)
+				 err = dec.innerDecodeC(trv, ic[0])
+				 if err != nil {
+					 return err
+				 }
+				 target, err = decoder.PostDecode(target)
+				 if err != nil {
+					 return err
+				 }
+				 reflect.Indirect(rv).Set(reflect.ValueOf(target))
+				 return nil
+			 } else {
+				 target := CBORTag{}
+				 target.Tag = aux
+				 err = dec.innerDecodeC(reflect.ValueOf(&target.WrappedObject), ic[0])
+				 if err != nil {
+					 return err
+				 }
+				 reflect.Indirect(rv).Set(reflect.ValueOf(target))
+				 return nil
+			 }
 		 }
 		 return nil
 	 } else if cborType == cbor7 {
@@ -716,7 +760,7 @@ func setBytes(rv reflect.Value, buf []byte) error {
 		rv.Set(reflect.ValueOf(string(buf)))
 		return nil
 	default:
-		return fmt.Errorf("cannot assign []byte into Kind=%s Type=%s %#v", rv.Kind().String(), rv.Type().String(), rv)
+		return fmt.Errorf("cannot assign []byte into Kind=%s Type=%s %#v", rv.Kind().String(), ""/*rv.Type().String()*/, rv)
 	}
 }
 
