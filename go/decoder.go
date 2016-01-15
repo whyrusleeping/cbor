@@ -53,10 +53,10 @@ func NewDecoder(r io.Reader) *Decoder {
 func (dec *Decoder) Decode(v interface{}) error {
 	rv := reflect.ValueOf(v)
 
-	return dec.DecodeValue(newReflectValue(rv))
+	return dec.DecodeAny(newReflectValue(rv))
 }
 
-func (dec *Decoder) DecodeValue(v DecodeValue) error {
+func (dec *Decoder) DecodeAny(v DecodeValue) error {
 	var didread int
 	var err error
 
@@ -232,29 +232,22 @@ func (dec *Decoder) innerDecodeC(rv DecodeValue, c byte) error {
 		} else if aux == tagBigfloat {
 			log.Printf("TODO: directly read bytes into bigfloat")
 		} else {
-			decoder, ok := dec.TagDecoders[aux]
-			if ok {
-				target := decoder.DecodeTarget()
-				trv := rv.TagValueFrom(target)
-				err = dec.innerDecodeC(trv, ic[0])
-				if err != nil {
-					return err
-				}
-				target, err = decoder.PostDecode(target)
-				if err != nil {
-					return err
-				}
-				rv.SetTag(trv, target)
-				return nil
-			} else {
-				trv, target := rv.TagValue(aux)
-				err = dec.innerDecodeC(trv, ic[0])
-				if err != nil {
-					return err
-				}
-				rv.SetTag(trv, target)
-				return nil
+			decoder := dec.TagDecoders[aux]
+			var target interface{}
+			var trv DecodeValue
+			var err error
+
+			trv, target, err = rv.CreateTag(aux, decoder)
+			if err != nil {
+				return err
 			}
+
+			err = dec.innerDecodeC(trv, ic[0])
+			if err != nil {
+				return err
+			}
+
+			return rv.SetTag(aux, trv, decoder, target)
 		}
 		return nil
 	} else if cborType == cbor7 {
@@ -282,9 +275,9 @@ func (dec *Decoder) innerDecodeC(rv DecodeValue, c byte) error {
 			d := math.Float64frombits(aux)
 			return rv.SetFloat64(d)
 		} else if cborInfo == cborFalse {
-			rv.SetBool(false)
+			return rv.SetBool(false)
 		} else if cborInfo == cborTrue {
-			rv.SetBool(true)
+			return rv.SetBool(true)
 		} else if cborInfo == cborNull {
 			return rv.SetNil()
 		}
@@ -307,9 +300,7 @@ func (dec *Decoder) decodeText(rv DecodeValue, cborInfo byte, aux uint64) error 
 			if subc[0] == 0xff {
 				// done
 				joined := strings.Join(parts, "")
-				rv.SetString(joined)
-				//reflect.Indirect(rv).Set(reflect.ValueOf(joined))
-				return nil
+				return rv.SetString(joined)
 			} else {
 				var subtext interface{}
 				err = dec.innerDecodeC(newReflectValue(reflect.ValueOf(&subtext)), subc[0])
@@ -329,8 +320,7 @@ func (dec *Decoder) decodeText(rv DecodeValue, cborInfo byte, aux uint64) error 
 		raw := make([]byte, aux)
 		_, err = io.ReadFull(dec.rin, raw)
 		xs := string(raw)
-		rv.SetString(xs)
-		return nil
+		return rv.SetString(xs)
 	}
 	return errors.New("internal error in decodeText, shouldn't get here")
 }
@@ -369,6 +359,7 @@ func (irv *mapReflectValue) SetReflectValueForKey(key interface{}, value reflect
 		}
 	}
 	irv.SetMapIndex(krv, vrv)
+
 	return nil
 }
 
@@ -415,8 +406,8 @@ func (sa *structAssigner) SetReflectValueForKey(key interface{}, value reflect.V
 
 func (dec *Decoder) setMapKV(dvm DecodeValueMap, krv DecodeValue) error {
 	var err error
-	val, ok := dvm.CreateMapValue(krv)
-	if !ok {
+	val, err := dvm.CreateMapValue(krv)
+	if err != nil {
 		var throwaway interface{}
 		err = dec.Decode(&throwaway)
 		if err != nil {
@@ -424,7 +415,7 @@ func (dec *Decoder) setMapKV(dvm DecodeValueMap, krv DecodeValue) error {
 		}
 		return nil
 	}
-	err = dec.DecodeValue(val)
+	err = dec.DecodeAny(val)
 	if err != nil {
 		log.Printf("error decoding map val: T %T v %#v", val, val)
 		return err
@@ -462,7 +453,10 @@ func (dec *Decoder) decodeMap(rv DecodeValue, cborInfo byte, aux uint64) error {
 				break
 			} else {
 				//var key interface{}
-				krv := dvm.CreateMapKey()
+				krv, err := dvm.CreateMapKey()
+				if err != nil {
+					return err
+				}
 				//var val interface{}
 				err = dec.innerDecodeC(krv, subc[0])
 				if err != nil {
@@ -480,10 +474,13 @@ func (dec *Decoder) decodeMap(rv DecodeValue, cborInfo byte, aux uint64) error {
 		var i uint64
 		for i = 0; i < aux; i++ {
 			//var key interface{}
-			krv := dvm.CreateMapKey()
+			krv, err := dvm.CreateMapKey()
+			if err != nil {
+				return err
+			}
 			//var val interface{}
 			//err = dec.Decode(&key)
-			err = dec.DecodeValue(krv)
+			err = dec.DecodeAny(krv)
 			if err != nil {
 				log.Printf("error decoding map key #, %s", err)
 				return err
@@ -495,9 +492,7 @@ func (dec *Decoder) decodeMap(rv DecodeValue, cborInfo byte, aux uint64) error {
 		}
 	}
 
-	dvm.EndMap()
-
-	return nil
+	return dvm.EndMap()
 }
 
 func (dec *Decoder) decodeArray(rv DecodeValue, cborInfo byte, aux uint64) error {
@@ -520,6 +515,7 @@ func (dec *Decoder) decodeArray(rv DecodeValue, cborInfo byte, aux uint64) error
 	if cborInfo == varFollows {
 		//log.Printf("var array")
 		subc := []byte{0}
+		var idx uint64 = 0
 		for true {
 			_, err = io.ReadFull(dec.rin, subc)
 			if err != nil {
@@ -530,30 +526,41 @@ func (dec *Decoder) decodeArray(rv DecodeValue, cborInfo byte, aux uint64) error
 				// Done
 				break
 			}
-			subrv := dva.GetArrayValue()
-			err := dec.innerDecodeC(subrv, subc[0])
+			subrv, err := dva.GetArrayValue(idx)
+			if err != nil {
+				return err
+			}
+			err = dec.innerDecodeC(subrv, subc[0])
 			if err != nil {
 				log.Printf("error decoding array subob")
 				return err
 			}
-			dva.AppendArray(subrv)
+			err = dva.AppendArray(subrv)
+			if err != nil {
+				return err
+			}
+			idx++
 		}
 	} else {
 		var i uint64
 		for i = 0; i < aux; i++ {
-			subrv := dva.GetArrayValue()
-			err := dec.DecodeValue(subrv)
+			subrv, err := dva.GetArrayValue(i)
+			if err != nil {
+				return err
+			}
+			err = dec.DecodeAny(subrv)
 			if err != nil {
 				log.Printf("error decoding array subob")
 				return err
 			}
-			dva.AppendArray(subrv)
+			err = dva.AppendArray(subrv)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
-	dva.EndArray()
-
-	return nil
+	return dva.EndArray()
 }
 
 func (dec *Decoder) decodeBignum(c byte) (*big.Int, error) {

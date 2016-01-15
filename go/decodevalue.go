@@ -25,10 +25,10 @@ type DecodeValue interface {
 	SetNil() error
 
 	// Got boolean
-	SetBool(b bool)
+	SetBool(b bool) error
 
 	// Got text string
-	SetString(s string)
+	SetString(s string) error
 
 	// Got a Map (beginning)
 	CreateMap() (DecodeValueMap, error)
@@ -36,43 +36,58 @@ type DecodeValue interface {
 	// Got an array (beginning)
 	CreateArray(makeLength int) (DecodeValueArray, error)
 
-	// Got a tag not managed by a TagDecoder
-	TagValue(aux uint64) (DecodeValue, interface{})
+	// Got a tag
+	CreateTag(aux uint64, decoder TagDecoder) (DecodeValue, interface{}, error)
 
-	// Got a tag managed by a TagDecoder
-	TagValueFrom(v interface{}) DecodeValue
-
-	// Got the tag value (maybe transfoemed by TagDecoder.PostDecode)
-	SetTag(v DecodeValue, i interface{})
+	// Got the tag value (maybe transformed by TagDecoder.PostDecode)
+	SetTag(aux uint64, v DecodeValue, decoder TagDecoder, i interface{}) error
 }
 
 type DecodeValueMap interface {
 	// Got a map key
-	CreateMapKey() DecodeValue
+	CreateMapKey() (DecodeValue, error)
 
 	// Got a map value
-	CreateMapValue(key DecodeValue) (DecodeValue, bool)
+	CreateMapValue(key DecodeValue) (DecodeValue, error)
 
 	// Got a key / value pair
 	SetMap(key, val DecodeValue) error
 
 	// The map is at the end
-	EndMap()
+	EndMap() error
 }
 
 type DecodeValueArray interface {
 	// Got an array item
-	GetArrayValue() DecodeValue
+	GetArrayValue(index uint64) (DecodeValue, error)
 
 	// After the array item is decoded
-	AppendArray(value DecodeValue)
+	AppendArray(value DecodeValue) error
 
 	// The array is at the end
-	EndArray()
+	EndArray() error
 }
 
 type reflectValue struct {
 	v reflect.Value
+}
+
+type MemoryValue struct {
+	reflectValue
+	Value interface{}
+}
+
+func NewMemoryValue(value interface{}) *MemoryValue {
+	res := &MemoryValue{
+		reflectValue{reflect.ValueOf(nil)},
+		value,
+	}
+	res.v = reflect.ValueOf(&res.Value)
+	return res
+}
+
+func (mv *MemoryValue) ReflectValue() reflect.Value {
+	return mv.v
 }
 
 func newReflectValue(rv reflect.Value) *reflectValue {
@@ -228,11 +243,12 @@ func (r *reflectValue) SetNil() error {
 	return nil
 }
 
-func (r *reflectValue) SetBool(b bool) {
+func (r *reflectValue) SetBool(b bool) error {
 	reflect.Indirect(r.v).Set(reflect.ValueOf(b))
+	return nil
 }
 
-func (r *reflectValue) SetString(xs string) {
+func (r *reflectValue) SetString(xs string) error {
 	// handle either concrete string or string* to nil
 	deref := reflect.Indirect(r.v)
 	if !deref.CanSet() {
@@ -240,6 +256,8 @@ func (r *reflectValue) SetString(xs string) {
 	} else {
 		deref.Set(reflect.ValueOf(xs))
 	}
+	//reflect.Indirect(rv).Set(reflect.ValueOf(joined))
+	return nil
 }
 
 func (r *reflectValue) CreateMap() (DecodeValueMap, error) {
@@ -294,23 +312,28 @@ type reflectValueMap struct {
 	keyType reflect.Type
 }
 
-func (r *reflectValueMap) CreateMapKey() DecodeValue {
-	return newReflectValue(reflect.New(r.keyType))
+func (r *reflectValueMap) CreateMapKey() (DecodeValue, error) {
+	return newReflectValue(reflect.New(r.keyType)), nil
 }
 
-func (r *reflectValueMap) CreateMapValue(key DecodeValue) (DecodeValue, bool) {
+func (r *reflectValueMap) CreateMapValue(key DecodeValue) (DecodeValue, error) {
+	var err error
 	v, ok := r.ma.ReflectValueForKey(key.(*reflectValue).v.Interface())
-	return newReflectValue(*v), ok
+	if !ok {
+		err = fmt.Errorf("Could not reflect value for key")
+	}
+	return newReflectValue(*v), err
 }
 
 func (r *reflectValueMap) SetMap(key, val DecodeValue) error {
 	return r.ma.SetReflectValueForKey(key.(*reflectValue).v.Interface(), val.(*reflectValue).v)
 }
 
-func (r *reflectValueMap) EndMap() {
+func (r *reflectValueMap) EndMap() error {
 	if r.drv.Kind() == reflect.Interface {
 		r.drv.Set(r.irv)
 	}
+	return nil
 }
 
 func (r *reflectValue) CreateArray(makeLength int) (DecodeValueArray, error) {
@@ -351,38 +374,49 @@ type reflectValueArray struct {
 	arrayPos   int
 }
 
-func (r *reflectValueArray) GetArrayValue() DecodeValue {
+func (r *reflectValueArray) GetArrayValue(index uint64) (DecodeValue, error) {
 	if r.rv.Kind() == reflect.Array {
-		return &reflectValue{r.rv.Index(r.arrayPos)}
+		return &reflectValue{r.rv.Index(r.arrayPos)}, nil
 	} else {
-		return &reflectValue{reflect.New(r.elemType)}
+		return &reflectValue{reflect.New(r.elemType)}, nil
 	}
 }
 
-func (r *reflectValueArray) AppendArray(subrv DecodeValue) {
+func (r *reflectValueArray) AppendArray(subrv DecodeValue) error {
 	if r.rv.Kind() == reflect.Array {
 		r.arrayPos++
 	} else {
 		r.irv = reflect.Append(r.irv, reflect.Indirect(subrv.(*reflectValue).v))
 	}
+	return nil
 }
 
-func (r *reflectValueArray) EndArray() {
+func (r *reflectValueArray) EndArray() error {
 	if r.rv.Kind() != reflect.Array {
 		r.rv.Set(r.irv)
 	}
+	return nil
 }
 
-func (r *reflectValue) TagValue(aux uint64) (DecodeValue, interface{}) {
-	target := &CBORTag{}
-	target.Tag = aux
-	return newReflectValue(reflect.ValueOf(&target.WrappedObject)), target
+func (r *reflectValue) CreateTag(aux uint64, decoder TagDecoder) (DecodeValue, interface{}, error) {
+	if decoder != nil {
+		target := decoder.DecodeTarget()
+		return newReflectValue(reflect.ValueOf(target)), target, nil
+	} else {
+		target := &CBORTag{}
+		target.Tag = aux
+		return newReflectValue(reflect.ValueOf(&target.WrappedObject)), target, nil
+	}
 }
 
-func (r *reflectValue) TagValueFrom(val interface{}) DecodeValue {
-	return newReflectValue(reflect.ValueOf(val))
-}
-
-func (r *reflectValue) SetTag(val DecodeValue, i interface{}) {
-	reflect.Indirect(r.v).Set(reflect.ValueOf(i))
+func (r *reflectValue) SetTag(code uint64, val DecodeValue, decoder TagDecoder, target interface{}) error {
+	var err error
+	if decoder != nil {
+		target, err = decoder.PostDecode(target)
+		if err != nil {
+			return err
+		}
+	}
+	reflect.Indirect(r.v).Set(reflect.ValueOf(target))
+	return nil
 }
