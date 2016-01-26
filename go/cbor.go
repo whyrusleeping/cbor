@@ -3,16 +3,18 @@
 
 package cbor
 
-import "bytes"
-import "sort"
-import "errors"
-import "fmt"
-import "io"
-import "log"
-import "math"
-import "math/big"
-import "reflect"
-import "strings"
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"math/big"
+	"reflect"
+	"sort"
+	"strings"
+)
 
 var typeMask byte = 0xE0
 var infoBits byte = 0x1F
@@ -97,26 +99,117 @@ func NewDecoder(r io.Reader) *Decoder {
 func (dec *Decoder) Decode(v interface{}) error {
 	rv := reflect.ValueOf(v)
 
-	return dec.reflectDecode(rv)
+	return dec.DecodeAny(newReflectValue(rv))
 }
-func (dec *Decoder) reflectDecode(rv reflect.Value) error {
-	var didread int
+
+type DecodeValue interface {
+	// Before decoding, check if there is no error
+	Prepare() error
+
+	// Got binary string
+	SetBytes(buf []byte) error
+
+	// Got a number (different formats)
+	SetBignum(x *big.Int) error
+	SetUint(u uint64) error
+	SetInt(i int64) error
+	SetFloat32(f float32) error
+	SetFloat64(d float64) error
+
+	// Got null
+	SetNil() error
+
+	// Got boolean
+	SetBool(b bool) error
+
+	// Got text string
+	SetString(s string) error
+
+	// Got a Map (beginning)
+	CreateMap() (DecodeValueMap, error)
+
+	// Got an array (beginning)
+	CreateArray(makeLength int) (DecodeValueArray, error)
+
+	// Got a tag
+	CreateTag(aux uint64, decoder TagDecoder) (DecodeValue, interface{}, error)
+
+	// Got the tag value (maybe transformed by TagDecoder.PostDecode)
+	SetTag(aux uint64, v DecodeValue, decoder TagDecoder, i interface{}) error
+}
+
+type DecodeValueMap interface {
+	// Got a map key
+	CreateMapKey() (DecodeValue, error)
+
+	// Got a map value
+	CreateMapValue(key DecodeValue) (DecodeValue, error)
+
+	// Got a key / value pair
+	SetMap(key, val DecodeValue) error
+
+	// The map is at the end
+	EndMap() error
+}
+
+type DecodeValueArray interface {
+	// Got an array item
+	GetArrayValue(index uint64) (DecodeValue, error)
+
+	// After the array item is decoded
+	AppendArray(value DecodeValue) error
+
+	// The array is at the end
+	EndArray() error
+}
+
+type reflectValue struct {
+	v reflect.Value
+}
+
+type MemoryValue struct {
+	reflectValue
+	Value interface{}
+}
+
+func NewMemoryValue(value interface{}) *MemoryValue {
+	res := &MemoryValue{
+		reflectValue{reflect.ValueOf(nil)},
+		value,
+	}
+	res.v = reflect.ValueOf(&res.Value)
+	return res
+}
+
+func (mv *MemoryValue) ReflectValue() reflect.Value {
+	return mv.v
+}
+
+func newReflectValue(rv reflect.Value) *reflectValue {
+	return &reflectValue{rv}
+}
+
+func (r *reflectValue) Prepare() error {
+	rv := r.v
+	if (!rv.CanSet()) && (rv.Kind() != reflect.Ptr || rv.IsNil()) {
+		return &InvalidUnmarshalError{rv.Type()}
+	}
+	return nil
+}
+
+func (dec *Decoder) DecodeAny(v DecodeValue) error {
 	var err error
 
-	didread, err = io.ReadFull(dec.rin, dec.c)
-
-	if didread == 1 {
-		/* log.Printf("got one %x\n", dec.c[0]) */
-	}
-
+	_, err = io.ReadFull(dec.rin, dec.c)
 	if err != nil {
 		return err
 	}
 
-	if (!rv.CanSet()) && (rv.Kind() != reflect.Ptr || rv.IsNil()) {
-		return &InvalidUnmarshalError{rv.Type()}
+	if err := v.Prepare(); err != nil {
+		return err
 	}
-	return dec.innerDecodeC(rv, dec.c[0])
+
+	return dec.innerDecodeC(v, dec.c[0])
 }
 
 func (dec *Decoder) handleInfoBits(cborInfo byte) (uint64, error) {
@@ -163,7 +256,7 @@ func (dec *Decoder) handleInfoBits(cborInfo byte) (uint64, error) {
 	return 0, nil
 }
 
-func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
+func (dec *Decoder) innerDecodeC(rv DecodeValue, c byte) error {
 	cborType := c & typeMask
 	cborInfo := c & infoBits
 
@@ -175,7 +268,7 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 	//log.Printf("cborType %x cborInfo %d aux %x", cborType, cborInfo, aux)
 
 	if cborType == cborUint {
-		return setUint(rv, aux)
+		return rv.SetUint(aux)
 	} else if cborType == cborNegint {
 		if aux > 0x7fffffffffffffff {
 			//return errors.New(fmt.Sprintf("cannot represent -%d", aux))
@@ -185,9 +278,9 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			bn := &big.Int{}
 			bn.Sub(minusOne, bigU)
 			//log.Printf("built big negint: %v", bn)
-			return setBignum(rv, bn)
+			return rv.SetBignum(bn)
 		}
-		return setInt(rv, -1-int64(aux))
+		return rv.SetInt(-1 - int64(aux))
 	} else if cborType == cborBytes {
 		//log.Printf("cborType %x bytes cborInfo %d aux %x", cborType, cborInfo, aux)
 		if cborInfo == varFollows {
@@ -212,13 +305,13 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 							pos += copy(out[pos:], p)
 						}
 					}
-					return setBytes(rv, out)
+					return rv.SetBytes(out)
 				} else {
 					var subb []byte = nil
 					if (subc[0] & typeMask) != cborBytes {
 						return fmt.Errorf("sub of var bytes is type %x, wanted %x", subc[0], cborBytes)
 					}
-					err = dec.innerDecodeC(reflect.ValueOf(&subb), subc[0])
+					err = dec.innerDecodeC(newReflectValue(reflect.ValueOf(&subb)), subc[0])
 					if err != nil {
 						log.Printf("error decoding sub bytes")
 						return err
@@ -234,7 +327,7 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 				return err
 			}
 			// Don't really care about count, ReadFull will make it all or none and we can just fall out with whatever error
-			return setBytes(rv, val)
+			return rv.SetBytes(val)
 			/*if (rv.Kind() == reflect.Slice) && (rv.Type().Elem().Kind() == reflect.Uint8) {
 				rv.SetBytes(val)
 			} else {
@@ -259,7 +352,7 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			if err != nil {
 				return err
 			}
-			return setBignum(rv, bn)
+			return rv.SetBignum(bn)
 		} else if aux == tagNegBignum {
 			bn, err := dec.decodeBignum(ic[0])
 			if err != nil {
@@ -268,36 +361,28 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			minusOne := big.NewInt(-1)
 			bnOut := &big.Int{}
 			bnOut.Sub(minusOne, bn)
-			return setBignum(rv, bnOut)
+			return rv.SetBignum(bnOut)
 		} else if aux == tagDecimal {
 			log.Printf("TODO: directly read bytes into decimal")
 		} else if aux == tagBigfloat {
 			log.Printf("TODO: directly read bytes into bigfloat")
 		} else {
-			decoder, ok := dec.TagDecoders[aux]
-			if ok {
-				target := decoder.DecodeTarget()
-				trv := reflect.ValueOf(target)
-				err = dec.innerDecodeC(trv, ic[0])
-				if err != nil {
-					return err
-				}
-				target, err = decoder.PostDecode(target)
-				if err != nil {
-					return err
-				}
-				reflect.Indirect(rv).Set(reflect.ValueOf(target))
-				return nil
-			} else {
-				target := CBORTag{}
-				target.Tag = aux
-				err = dec.innerDecodeC(reflect.ValueOf(&target.WrappedObject), ic[0])
-				if err != nil {
-					return err
-				}
-				reflect.Indirect(rv).Set(reflect.ValueOf(target))
-				return nil
+			decoder := dec.TagDecoders[aux]
+			var target interface{}
+			var trv DecodeValue
+			var err error
+
+			trv, target, err = rv.CreateTag(aux, decoder)
+			if err != nil {
+				return err
 			}
+
+			err = dec.innerDecodeC(trv, ic[0])
+			if err != nil {
+				return err
+			}
+
+			return rv.SetTag(aux, trv, decoder, target)
 		}
 		return nil
 	} else if cborType == cbor7 {
@@ -317,26 +402,26 @@ func (dec *Decoder) innerDecodeC(rv reflect.Value, c byte) error {
 			if (aux & 0x08000) != 0 {
 				val = -val
 			}
-			return setFloat64(rv, val)
+			return rv.SetFloat64(val)
 		} else if cborInfo == int32Follows {
 			f := math.Float32frombits(uint32(aux))
-			return setFloat32(rv, f)
+			return rv.SetFloat32(f)
 		} else if cborInfo == int64Follows {
 			d := math.Float64frombits(aux)
-			return setFloat64(rv, d)
+			return rv.SetFloat64(d)
 		} else if cborInfo == cborFalse {
-			reflect.Indirect(rv).Set(reflect.ValueOf(false))
+			return rv.SetBool(false)
 		} else if cborInfo == cborTrue {
-			reflect.Indirect(rv).Set(reflect.ValueOf(true))
+			return rv.SetBool(true)
 		} else if cborInfo == cborNull {
-			return setNil(rv)
+			return rv.SetNil()
 		}
 	}
 
 	return err
 }
 
-func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) error {
+func (dec *Decoder) decodeText(rv DecodeValue, cborInfo byte, aux uint64) error {
 	var err error
 	if cborInfo == varFollows {
 		parts := make([]string, 0, 1)
@@ -350,12 +435,10 @@ func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) erro
 			if subc[0] == 0xff {
 				// done
 				joined := strings.Join(parts, "")
-				dtStringSet(rv, joined)
-				//reflect.Indirect(rv).Set(reflect.ValueOf(joined))
-				return nil
+				return rv.SetString(joined)
 			} else {
 				var subtext interface{}
-				err = dec.innerDecodeC(reflect.ValueOf(&subtext), subc[0])
+				err = dec.innerDecodeC(newReflectValue(reflect.ValueOf(&subtext)), subc[0])
 				if err != nil {
 					log.Printf("error decoding subtext")
 					return err
@@ -372,19 +455,9 @@ func (dec *Decoder) decodeText(rv reflect.Value, cborInfo byte, aux uint64) erro
 		raw := make([]byte, aux)
 		_, err = io.ReadFull(dec.rin, raw)
 		xs := string(raw)
-		dtStringSet(rv, xs)
-		return nil
+		return rv.SetString(xs)
 	}
 	return errors.New("internal error in decodeText, shouldn't get here")
-}
-func dtStringSet(rv reflect.Value, xs string) {
-	// handle either concrete string or string* to nil
-	deref := reflect.Indirect(rv)
-	if !deref.CanSet() {
-		rv.Set(reflect.ValueOf(&xs))
-	} else {
-		deref.Set(reflect.ValueOf(xs))
-	}
 }
 
 type mapAssignable interface {
@@ -421,6 +494,7 @@ func (irv *mapReflectValue) SetReflectValueForKey(key interface{}, value reflect
 		}
 	}
 	irv.SetMapIndex(krv, vrv)
+
 	return nil
 }
 
@@ -465,10 +539,10 @@ func (sa *structAssigner) SetReflectValueForKey(key interface{}, value reflect.V
 	return nil
 }
 
-func (dec *Decoder) setMapKV(krv reflect.Value, ma mapAssignable) error {
+func (dec *Decoder) setMapKV(dvm DecodeValueMap, krv DecodeValue) error {
 	var err error
-	val, ok := ma.ReflectValueForKey(krv.Interface())
-	if !ok {
+	val, err := dvm.CreateMapValue(krv)
+	if err != nil {
 		var throwaway interface{}
 		err = dec.Decode(&throwaway)
 		if err != nil {
@@ -476,12 +550,12 @@ func (dec *Decoder) setMapKV(krv reflect.Value, ma mapAssignable) error {
 		}
 		return nil
 	}
-	err = dec.reflectDecode(*val)
+	err = dec.DecodeAny(val)
 	if err != nil {
-		log.Printf("error decoding map val: T %T v %#v v.T %s", val, val, val.Type().String())
+		log.Printf("error decoding map val: T %T v %#v", val, val)
 		return err
 	}
-	err = ma.SetReflectValueForKey(krv.Interface(), *val)
+	err = dvm.SetMap(krv, val)
 	if err != nil {
 		log.Printf("error setting value")
 		return err
@@ -490,9 +564,8 @@ func (dec *Decoder) setMapKV(krv reflect.Value, ma mapAssignable) error {
 	return nil
 }
 
-func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error {
-	//log.Print("decode map into   ", rv.Type().String())
-	// dereferenced reflect value
+func (r *reflectValue) CreateMap() (DecodeValueMap, error) {
+	rv := r.v
 	var drv reflect.Value
 	if rv.Kind() == reflect.Ptr {
 		drv = reflect.Indirect(rv)
@@ -525,16 +598,59 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 			if drv.CanSet() {
 				drv.Set(reflect.MakeMap(drv.Type()))
 			} else {
-				return fmt.Errorf("target map is nil and not settable")
+				return nil, fmt.Errorf("target map is nil and not settable")
 			}
 		}
 		keyType = drv.Type().Key()
 		ma = &mapReflectValue{drv}
 	default:
-		return fmt.Errorf("can't read map into %s", rv.Type().String())
+		return nil, fmt.Errorf("can't read map into %s", rv.Type().String())
 	}
 
+	return &reflectValueMap{drv, irv, ma, keyType}, nil
+}
+
+type reflectValueMap struct {
+	drv     reflect.Value
+	irv     reflect.Value
+	ma      mapAssignable
+	keyType reflect.Type
+}
+
+func (r *reflectValueMap) CreateMapKey() (DecodeValue, error) {
+	return newReflectValue(reflect.New(r.keyType)), nil
+}
+
+func (r *reflectValueMap) CreateMapValue(key DecodeValue) (DecodeValue, error) {
 	var err error
+	v, ok := r.ma.ReflectValueForKey(key.(*reflectValue).v.Interface())
+	if !ok {
+		err = fmt.Errorf("Could not reflect value for key")
+	}
+	return newReflectValue(*v), err
+}
+
+func (r *reflectValueMap) SetMap(key, val DecodeValue) error {
+	return r.ma.SetReflectValueForKey(key.(*reflectValue).v.Interface(), val.(*reflectValue).v)
+}
+
+func (r *reflectValueMap) EndMap() error {
+	if r.drv.Kind() == reflect.Interface {
+		r.drv.Set(r.irv)
+	}
+	return nil
+}
+
+func (dec *Decoder) decodeMap(rv DecodeValue, cborInfo byte, aux uint64) error {
+	//log.Print("decode map into   ", rv.Type().String())
+	// dereferenced reflect value
+	var dvm DecodeValueMap
+	var err error
+
+	dvm, err = rv.CreateMap()
+	if err != nil {
+		return err
+	}
 
 	if cborInfo == varFollows {
 		subc := []byte{0}
@@ -549,7 +665,10 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 				break
 			} else {
 				//var key interface{}
-				krv := reflect.New(keyType)
+				krv, err := dvm.CreateMapKey()
+				if err != nil {
+					return err
+				}
 				//var val interface{}
 				err = dec.innerDecodeC(krv, subc[0])
 				if err != nil {
@@ -557,7 +676,7 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 					return err
 				}
 
-				err = dec.setMapKV(krv, ma)
+				err = dec.setMapKV(dvm, krv)
 				if err != nil {
 					return err
 				}
@@ -567,37 +686,32 @@ func (dec *Decoder) decodeMap(rv reflect.Value, cborInfo byte, aux uint64) error
 		var i uint64
 		for i = 0; i < aux; i++ {
 			//var key interface{}
-			krv := reflect.New(keyType)
+			krv, err := dvm.CreateMapKey()
+			if err != nil {
+				return err
+			}
 			//var val interface{}
 			//err = dec.Decode(&key)
-			err = dec.reflectDecode(krv)
+			err = dec.DecodeAny(krv)
 			if err != nil {
 				log.Printf("error decoding map key #, %s", err)
 				return err
 			}
-			err = dec.setMapKV(krv, ma)
+			err = dec.setMapKV(dvm, krv)
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	if drv.Kind() == reflect.Interface {
-		drv.Set(irv)
-	}
-	return nil
+	return dvm.EndMap()
 }
 
-func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) error {
+func (r *reflectValue) CreateArray(makeLength int) (DecodeValueArray, error) {
+	var rv reflect.Value = r.v
+
 	if rv.Kind() == reflect.Ptr {
 		rv = reflect.Indirect(rv)
-	}
-
-	var makeLength int = 0
-	if cborInfo == varFollows {
-		// no special capacity to allocate the slice to
-	} else {
-		makeLength = int(aux)
 	}
 
 	// inner reflect value
@@ -617,15 +731,65 @@ func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) err
 	case reflect.Array:
 		// no irv, no elemType
 	default:
-		return fmt.Errorf("can't read array into %s", rv.Type().String())
+		return nil, fmt.Errorf("can't read array into %s", rv.Type().String())
 	}
 
+	return &reflectValueArray{rv, makeLength, irv, elemType, 0}, nil
+}
+
+type reflectValueArray struct {
+	rv         reflect.Value
+	makeLength int
+	irv        reflect.Value
+	elemType   reflect.Type
+	arrayPos   int
+}
+
+func (r *reflectValueArray) GetArrayValue(index uint64) (DecodeValue, error) {
+	if r.rv.Kind() == reflect.Array {
+		return &reflectValue{r.rv.Index(r.arrayPos)}, nil
+	} else {
+		return &reflectValue{reflect.New(r.elemType)}, nil
+	}
+}
+
+func (r *reflectValueArray) AppendArray(subrv DecodeValue) error {
+	if r.rv.Kind() == reflect.Array {
+		r.arrayPos++
+	} else {
+		r.irv = reflect.Append(r.irv, reflect.Indirect(subrv.(*reflectValue).v))
+	}
+	return nil
+}
+
+func (r *reflectValueArray) EndArray() error {
+	if r.rv.Kind() != reflect.Array {
+		r.rv.Set(r.irv)
+	}
+	return nil
+}
+
+func (dec *Decoder) decodeArray(rv DecodeValue, cborInfo byte, aux uint64) error {
+
 	var err error
+	var dva DecodeValueArray
+
+	var makeLength int = 0
+	if cborInfo == varFollows {
+		// no special capacity to allocate the slice to
+	} else {
+		makeLength = int(aux)
+	}
+
+	dva, err = rv.CreateArray(makeLength)
+	if err != nil {
+		return err
+	}
 
 	if cborInfo == varFollows {
-		var arrayPos int = 0
 		//log.Printf("var array")
 		subc := []byte{0}
+		var idx uint64 = 0
 		for true {
 			_, err = io.ReadFull(dec.rin, subc)
 			if err != nil {
@@ -635,49 +799,42 @@ func (dec *Decoder) decodeArray(rv reflect.Value, cborInfo byte, aux uint64) err
 			if subc[0] == 0xff {
 				// Done
 				break
-			} else if rv.Kind() == reflect.Array {
-				err := dec.innerDecodeC(rv.Index(arrayPos), subc[0])
-				if err != nil {
-					log.Printf("error decoding array subob")
-					return err
-				}
-				arrayPos++
-			} else {
-				subrv := reflect.New(elemType)
-				err := dec.innerDecodeC(subrv, subc[0])
-				if err != nil {
-					log.Printf("error decoding array subob")
-					return err
-				}
-				irv = reflect.Append(irv, reflect.Indirect(subrv))
 			}
+			subrv, err := dva.GetArrayValue(idx)
+			if err != nil {
+				return err
+			}
+			err = dec.innerDecodeC(subrv, subc[0])
+			if err != nil {
+				log.Printf("error decoding array subob")
+				return err
+			}
+			err = dva.AppendArray(subrv)
+			if err != nil {
+				return err
+			}
+			idx++
 		}
 	} else {
 		var i uint64
 		for i = 0; i < aux; i++ {
-			if rv.Kind() == reflect.Array {
-				err := dec.reflectDecode(rv.Index(int(i)))
-				if err != nil {
-					log.Printf("error decoding array subob")
-					return err
-				}
-			} else {
-				subrv := reflect.New(elemType)
-				err := dec.reflectDecode(subrv)
-				if err != nil {
-					log.Printf("error decoding array subob")
-					return err
-				}
-				irv = reflect.Append(irv, reflect.Indirect(subrv))
+			subrv, err := dva.GetArrayValue(i)
+			if err != nil {
+				return err
+			}
+			err = dec.DecodeAny(subrv)
+			if err != nil {
+				log.Printf("error decoding array subob")
+				return err
+			}
+			err = dva.AppendArray(subrv)
+			if err != nil {
+				return err
 			}
 		}
 	}
 
-	if rv.Kind() != reflect.Array {
-		rv.Set(irv)
-	}
-
-	return nil
+	return dva.EndArray()
 }
 
 func (dec *Decoder) decodeBignum(c byte) (*big.Int, error) {
@@ -713,10 +870,11 @@ func (dec *Decoder) decodeBignum(c byte) (*big.Int, error) {
 	return bn, nil
 }
 
-func setBignum(rv reflect.Value, x *big.Int) error {
+func (r *reflectValue) SetBignum(x *big.Int) error {
+	rv := r.v
 	switch rv.Kind() {
 	case reflect.Ptr:
-		return setBignum(reflect.Indirect(rv), x)
+		return newReflectValue(reflect.Indirect(rv)).SetBignum(x)
 	case reflect.Interface:
 		rv.Set(reflect.ValueOf(*x))
 		return nil
@@ -739,10 +897,11 @@ func setBignum(rv reflect.Value, x *big.Int) error {
 	}
 }
 
-func setBytes(rv reflect.Value, buf []byte) error {
+func (r *reflectValue) SetBytes(buf []byte) error {
+	rv := r.v
 	switch rv.Kind() {
 	case reflect.Ptr:
-		return setBytes(reflect.Indirect(rv), buf)
+		return newReflectValue(reflect.Indirect(rv)).SetBytes(buf)
 	case reflect.Interface:
 		rv.Set(reflect.ValueOf(buf))
 		return nil
@@ -761,7 +920,8 @@ func setBytes(rv reflect.Value, buf []byte) error {
 	}
 }
 
-func setUint(rv reflect.Value, u uint64) error {
+func (r *reflectValue) SetUint(u uint64) error {
+	rv := r.v
 	switch rv.Kind() {
 	case reflect.Ptr:
 		if rv.IsNil() {
@@ -772,7 +932,7 @@ func setUint(rv reflect.Value, u uint64) error {
 				return fmt.Errorf("trying to put uint into unsettable nil ptr")
 			}
 		}
-		return setUint(reflect.Indirect(rv), u)
+		return newReflectValue(reflect.Indirect(rv)).SetUint(u)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if rv.OverflowUint(u) {
 			return fmt.Errorf("value %d does not fit into target of type %s", u, rv.Kind().String())
@@ -792,10 +952,11 @@ func setUint(rv reflect.Value, u uint64) error {
 		return fmt.Errorf("cannot assign uint into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
 }
-func setInt(rv reflect.Value, i int64) error {
+func (r *reflectValue) SetInt(i int64) error {
+	rv := r.v
 	switch rv.Kind() {
 	case reflect.Ptr:
-		return setInt(reflect.Indirect(rv), i)
+		return newReflectValue(reflect.Indirect(rv)).SetInt(i)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if rv.OverflowInt(i) {
 			return fmt.Errorf("value %d does not fit into target of type %s", i, rv.Kind().String())
@@ -809,10 +970,11 @@ func setInt(rv reflect.Value, i int64) error {
 		return fmt.Errorf("cannot assign int into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
 }
-func setFloat32(rv reflect.Value, f float32) error {
+func (r *reflectValue) SetFloat32(f float32) error {
+	rv := r.v
 	switch rv.Kind() {
 	case reflect.Ptr:
-		return setFloat32(reflect.Indirect(rv), f)
+		return newReflectValue(reflect.Indirect(rv)).SetFloat32(f)
 	case reflect.Float32, reflect.Float64:
 		rv.SetFloat(float64(f))
 		return nil
@@ -823,10 +985,11 @@ func setFloat32(rv reflect.Value, f float32) error {
 		return fmt.Errorf("cannot assign float32 into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
 }
-func setFloat64(rv reflect.Value, d float64) error {
+func (r *reflectValue) SetFloat64(d float64) error {
+	rv := r.v
 	switch rv.Kind() {
 	case reflect.Ptr:
-		return setFloat64(reflect.Indirect(rv), d)
+		return newReflectValue(reflect.Indirect(rv)).SetFloat64(d)
 	case reflect.Float32, reflect.Float64:
 		rv.SetFloat(d)
 		return nil
@@ -837,7 +1000,8 @@ func setFloat64(rv reflect.Value, d float64) error {
 		return fmt.Errorf("cannot assign float64 into Kind=%s Type=%#v %#v", rv.Kind().String(), rv.Type(), rv)
 	}
 }
-func setNil(rv reflect.Value) error {
+func (r *reflectValue) SetNil() error {
+	rv := r.v
 	switch rv.Kind() {
 	case reflect.Ptr:
 		//return setNil(reflect.Indirect(rv))
@@ -852,6 +1016,49 @@ func setNil(rv reflect.Value) error {
 		log.Printf("setNil wat %s", rv.Type())
 		rv.Set(reflect.Zero(rv.Type()))
 	}
+	return nil
+}
+
+func (r *reflectValue) SetBool(b bool) error {
+	rv := r.v
+	reflect.Indirect(rv).Set(reflect.ValueOf(b))
+	return nil
+}
+
+func (r *reflectValue) SetString(xs string) error {
+	rv := r.v
+	// handle either concrete string or string* to nil
+	deref := reflect.Indirect(rv)
+	if !deref.CanSet() {
+		rv.Set(reflect.ValueOf(&xs))
+	} else {
+		deref.Set(reflect.ValueOf(xs))
+	}
+	//reflect.Indirect(rv).Set(reflect.ValueOf(joined))
+	return nil
+}
+
+func (r *reflectValue) CreateTag(aux uint64, decoder TagDecoder) (DecodeValue, interface{}, error) {
+	if decoder != nil {
+		target := decoder.DecodeTarget()
+		return newReflectValue(reflect.ValueOf(target)), target, nil
+	} else {
+		target := &CBORTag{}
+		target.Tag = aux
+		return newReflectValue(reflect.ValueOf(&target.WrappedObject)), target, nil
+	}
+}
+
+func (r *reflectValue) SetTag(code uint64, val DecodeValue, decoder TagDecoder, target interface{}) error {
+	rv := r.v
+	var err error
+	if decoder != nil {
+		target, err = decoder.PostDecode(target)
+		if err != nil {
+			return err
+		}
+	}
+	reflect.Indirect(rv).Set(reflect.ValueOf(target))
 	return nil
 }
 
