@@ -19,6 +19,29 @@ import (
 var typeMask byte = 0xE0
 var infoBits byte = 0x1F
 
+const (
+	MajorTypeUint   byte = 0
+	MajorTypeNegInt byte = iota
+	MajorTypeBytes
+	MajorTypeText
+	MajorTypeArray
+	MajorTypeMap
+	MajorTypeTag
+	MajorTypeSimple
+	MajorTypeFloat byte = MajorTypeSimple
+)
+
+const (
+	SimpleValueFalse byte = 20
+	SimpleValueTrue  byte = iota
+	SimpleValueNull
+	SimpleValueUndefined
+)
+
+const (
+	OpcodeBreak byte = 0x1F
+)
+
 /* type values */
 var cborUint byte = 0x00
 var cborNegint byte = 0x20
@@ -1085,8 +1108,18 @@ type CBORTag struct {
 	WrappedObject interface{}
 }
 
+func (t *CBORTag) ToCBOR(w io.Writer, enc *Encoder) error {
+	_, err := w.Write(EncodeInt(MajorTypeTag, t.Tag, nil))
+	if err != nil {
+		return err
+	}
+
+	return enc.Encode(t.WrappedObject)
+}
+
 type Encoder struct {
-	out io.Writer
+	out    io.Writer
+	filter func(v interface{}) interface{}
 
 	scratch []byte
 }
@@ -1145,14 +1178,54 @@ func Dumps(ob interface{}) ([]byte, error) {
 	return writeTarget.Bytes(), nil
 }
 
+type MarshallValue interface {
+	// Convert the value to CBOR. Specific CBOR data (such as tags) can be written
+	// on the io.Writer and more complex datatype can be written using the
+	// Encoder.
+	//
+	// To Write a Tag value, a possible implementation would be:
+	//
+	//  w.Write(cbor.EncodeTag(6, tag_value))
+	//  enc.Encode(tagged_value)
+	//
+	ToCBOR(w io.Writer, enc *Encoder) error
+}
+
+type SimpleMarshallValue interface {
+	// Convert the value to CBOR. The object is responsible to convert to CBOR
+	// in the correct format.
+	ToCBOR(w io.Writer) error
+}
+
+type CBORValue []byte
+
+func (v CBORValue) ToCBOR(w io.Writer) error {
+	_, err := w.Write(v)
+	return err
+}
+
 // Return new Encoder object for writing to supplied io.Writer.
 //
 // TODO: set options on Encoder object.
 func NewEncoder(out io.Writer) *Encoder {
-	return &Encoder{out, make([]byte, 9)}
+	return &Encoder{out, nil, make([]byte, 9)}
+}
+
+func (enc *Encoder) SetFilter(filter func(v interface{}) interface{}) {
+	enc.filter = filter
 }
 
 func (enc *Encoder) Encode(ob interface{}) error {
+	if enc.filter != nil {
+		ob = enc.filter(ob)
+	}
+
+	if v, ok := ob.(MarshallValue); ok {
+		return v.ToCBOR(enc.out, enc)
+	} else if v, ok := ob.(SimpleMarshallValue); ok {
+		return v.ToCBOR(enc.out)
+	}
+
 	switch x := ob.(type) {
 	case int:
 		return enc.writeInt(int64(x))
@@ -1195,6 +1268,16 @@ func (enc *Encoder) Encode(ob interface{}) error {
 }
 
 func (enc *Encoder) writeReflection(rv reflect.Value) error {
+	if enc.filter != nil {
+		rv = reflect.ValueOf(enc.filter(rv.Interface()))
+	}
+
+	if v, ok := rv.Interface().(MarshallValue); ok {
+		return v.ToCBOR(enc.out, enc)
+	} else if v, ok := rv.Interface().(SimpleMarshallValue); ok {
+		return v.ToCBOR(enc.out)
+	}
+
 	var err error
 	switch rv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -1407,6 +1490,92 @@ func (enc *Encoder) tagAux64(tag byte, x uint64) error {
 	enc.scratch[8] = byte(x & 0x0ff)
 	_, err := enc.out.Write(enc.scratch[:9])
 	return err
+}
+
+// Encode a CBOR integer unit. The first argument is the major type, the second
+// argument is the integer value. The result is a byte array from 1 to 9 bytes
+// depending on the size of the integer value.
+//
+// The major type (tag argument) must be an integer between 0 and 7 else this
+// function panics
+//
+// If the third parameter is non nil, the slice is reused to construct the
+// result to avoid a memory allocation. It should be a slice with a sufficient
+// capacity.
+func EncodeInt(tag byte, v uint64, buf []byte) []byte {
+	switch {
+	case v <= 23:
+		// tiny literal
+		return EncodeOpcode(tag, byte(v), buf)
+	case 23 < v && v < 0x0ff:
+		return EncodeInt8(tag, uint8(v), buf)
+	case 0xff <= v && v < 0x0ffff:
+		return EncodeInt16(tag, uint16(v), buf)
+	case 0xffff <= v && v < 0x0ffffffff:
+		return EncodeInt32(tag, uint32(v), buf)
+	default:
+		return EncodeInt64(tag, v, buf)
+	}
+}
+
+func EncodeOpcode(tag byte, opcode byte, buf []byte) []byte {
+	if tag > 7 {
+		panic("Wrong tag value")
+	}
+	return append(buf[0:0],
+		(tag<<5)|opcode,
+	)
+}
+
+func EncodeInt8(tag byte, v uint8, buf []byte) []byte {
+	if tag > 7 {
+		panic("Wrong tag value")
+	}
+	return append(buf[0:0],
+		(tag<<5)|int8Follows,
+		byte(v&0xff),
+	)
+}
+
+func EncodeInt16(tag byte, v uint16, buf []byte) []byte {
+	if tag > 7 {
+		panic("Wrong tag value")
+	}
+	return append(buf[0:0],
+		(tag<<5)|int16Follows,
+		byte((v>>8)&0xff),
+		byte(v&0xff),
+	)
+}
+
+func EncodeInt32(tag byte, v uint32, buf []byte) []byte {
+	if tag > 7 {
+		panic("Wrong tag value")
+	}
+	return append(buf[0:0],
+		(tag<<5)|int32Follows,
+		byte((v>>24)&0xff),
+		byte((v>>16)&0xff),
+		byte((v>>8)&0xff),
+		byte(v&0xff),
+	)
+}
+
+func EncodeInt64(tag byte, v uint64, buf []byte) []byte {
+	if tag > 7 {
+		panic("Wrong tag value")
+	}
+	return append(buf[0:0],
+		(tag<<5)|int64Follows,
+		byte((v>>56)&0xff),
+		byte((v>>48)&0xff),
+		byte((v>>40)&0xff),
+		byte((v>>32)&0xff),
+		byte((v>>24)&0xff),
+		byte((v>>16)&0xff),
+		byte((v>>8)&0xff),
+		byte(v&0xff),
+	)
 }
 
 func (enc *Encoder) writeText(x string) error {
