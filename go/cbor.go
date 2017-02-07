@@ -1028,7 +1028,7 @@ func (r *reflectValue) SetNil() error {
 	switch rv.Kind() {
 	case reflect.Ptr:
 		//return setNil(reflect.Indirect(rv))
-		rv.Set(reflect.Zero(rv.Type()))
+		rv.Elem().Set(reflect.Zero(rv.Elem().Type()))
 	case reflect.Interface:
 		if rv.IsNil() {
 			// already nil, okay!
