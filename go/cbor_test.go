@@ -1,23 +1,25 @@
 package cbor
 
-import "bytes"
-import "encoding/base64"
-import "encoding/hex"
-import "encoding/json"
-import "fmt"
-import "log"
-import "math"
-import "math/big"
-import "os"
-import "reflect"
-import "strings"
-import "testing"
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"math/big"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+)
 
 type testVector struct {
-	Cbor string
-	Hex string
-	Roundtrip bool
-	Decoded interface{}
+	Cbor       string
+	Hex        string
+	Roundtrip  bool
+	Decoded    interface{}
 	Diagnostic string
 }
 
@@ -36,7 +38,6 @@ func readVectors(t *testing.T) ([]testVector, error) {
 	return *they, err
 }
 
-
 func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 	switch i := cborv.(type) {
 	case uint64:
@@ -46,11 +47,11 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		case uint64:
 			return i == jv
 		case float64:
-			return math.Abs(float64(i) - jv) < math.Max(math.Abs(jv / 1000000000.0), 1.0/1000000000.0)
+			return math.Abs(float64(i)-jv) < math.Max(math.Abs(jv/1000000000.0), 1.0/1000000000.0)
 		case json.Number:
 			return jv.String() == fmt.Sprintf("%d", i)
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case big.Int:
@@ -58,7 +59,7 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		case json.Number:
 			return jv.String() == i.String()
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case int64:
@@ -68,7 +69,7 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		case json.Number:
 			return jv.String() == fmt.Sprintf("%d", i)
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case float32:
@@ -78,11 +79,11 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 			fv, err := jv.Float64()
 			if err != nil {
 				t.Errorf("error getting json float: %s", err)
-				return false;
+				return false
 			}
 			return fv == float64(i)
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case float64:
@@ -92,11 +93,11 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 			fv, err := jv.Float64()
 			if err != nil {
 				t.Errorf("error getting json float: %s", err)
-				return false;
+				return false
 			}
 			return fv == i
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case bool:
@@ -104,7 +105,7 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		case bool:
 			return jv == i
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case string:
@@ -112,7 +113,7 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		case string:
 			return jv == i
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case []interface{}:
@@ -121,37 +122,37 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 			if len(i) != len(jv) {
 				return false
 			}
-			for cai, cav := range(i) {
+			for cai, cav := range i {
 				if !jeq(jv[cai], cav, t) {
 					t.Errorf("array mismatch at [%d]: json=%#v cbor=%#v", cai, jv[cai], cav)
 					return false
 				}
-/*
-				if fmt.Sprintf("%v", cav) != fmt.Sprintf("%v", jv[cai]) {
-					return false
-				}
-*/
+				/*
+					if fmt.Sprintf("%v", cav) != fmt.Sprintf("%v", jv[cai]) {
+						return false
+					}
+				*/
 			}
 			return true
 		default:
 			if reflect.DeepEqual(cborv, jsonv) {
 				return true
 			}
-			t.Errorf("wat types cbor %T json %T", cborv, jsonv);
+			t.Errorf("wat types cbor %T json %T", cborv, jsonv)
 			return false
 		}
 	case nil:
 		switch jv := jsonv.(type) {
 		case nil:
-			return true;
+			return true
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jv);
+			t.Errorf("wat types cbor %T json %T", cborv, jv)
 			return false
 		}
 	case map[interface{}]interface{}:
 		switch jv := jsonv.(type) {
 		case map[string]interface{}:
-			for jmk, jmv := range(jv) {
+			for jmk, jmv := range jv {
 				cmv, ok := i[jmk]
 				if !ok {
 					t.Errorf("json key %v missing from cbor", jmk)
@@ -161,16 +162,16 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 					t.Errorf("map key=%#v values: json=%#v cbor=%#v", jmk, jmv, cmv)
 					return false
 				}
-/*
-				if !reflect.DeepEqual(cmv, jmv) {
-					t.Errorf("map key=%#v values: json=%#v cbor=%#v", jmk, jmv, cmv)
-					return false
-				}
-*/
+				/*
+					if !reflect.DeepEqual(cmv, jmv) {
+						t.Errorf("map key=%#v values: json=%#v cbor=%#v", jmk, jmv, cmv)
+						return false
+					}
+				*/
 			}
 			return true
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jv);
+			t.Errorf("wat types cbor %T json %T", cborv, jv)
 			return false
 		}
 	case []byte:
@@ -178,12 +179,12 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		case []byte:
 			return bytes.Equal(i, jv)
 		default:
-			t.Errorf("wat types cbor %T json %T", cborv, jv);
+			t.Errorf("wat types cbor %T json %T", cborv, jv)
 			return false
 		}
 	default:
 		eq := reflect.DeepEqual(jsonv, cborv)
-		if ! eq {
+		if !eq {
 			log.Printf("unexpected cbor type %T = %#v", cborv, cborv)
 			t.Errorf("unexpected cbor type %T = %#v", cborv, cborv)
 		}
@@ -192,7 +193,6 @@ func jeq(jsonv, cborv interface{}, t *testing.T) bool {
 		//return jsonv == cborv
 	}
 }
-
 
 func TestDecodeVectors(t *testing.T) {
 	//t.Parallel()
@@ -208,7 +208,7 @@ func TestDecodeVectors(t *testing.T) {
 		t.Fatal("got no test vectors")
 		return
 	}
-	for i, testv := range(they) {
+	for i, testv := range they {
 		if testv.Decoded != nil && len(testv.Cbor) > 0 {
 			//log.Printf("hex %s", testv.Hex)
 			t.Logf("hex %s", testv.Hex)
@@ -238,23 +238,21 @@ func TestDecodeVectors(t *testing.T) {
 	}
 }
 
-
 type RefTestOb struct {
-	AString string
-	BInt int
-	CUint uint64
-	DFloat float64
-	EIntArray []int
+	AString    string
+	BInt       int
+	CUint      uint64
+	DFloat     float64
+	EIntArray  []int
 	FStrIntMap map[string]int
-	GBool bool
+	GBool      bool
 }
 
 type privateTestOb struct {
 	privateInt int
-	PubInt int
-	PubSkip int `cbor:"-"`
+	PubInt     int
+	PubSkip    int `cbor:"-"`
 }
-
 
 func checkObOne(ob RefTestOb, t *testing.T) bool {
 	ok := true
@@ -277,15 +275,14 @@ func checkObOne(ob RefTestOb, t *testing.T) bool {
 	return ok
 }
 
-
 const (
-	reflexObOneJson = "{\"astring\": \"astring val\", \"bint\": -33, \"cuint\": 42, \"dfloat\": 0.25, \"eintarray\": [1,2,3], \"fstrintmap\":{\"a\":13, \"b\":14}, \"gbool\": false}"
+	reflexObOneJson    = "{\"astring\": \"astring val\", \"bint\": -33, \"cuint\": 42, \"dfloat\": 0.25, \"eintarray\": [1,2,3], \"fstrintmap\":{\"a\":13, \"b\":14}, \"gbool\": false}"
 	reflexObOneCborB64 = "p2dhc3RyaW5na2FzdHJpbmcgdmFsamZzdHJpbnRtYXCiYWENYWIOZWdib29s9GRiaW50OCBpZWludGFycmF5gwECA2VjdWludBgqZmRmbG9hdPs/0AAAAAAAAA=="
 )
 
 var referenceObOne RefTestOb = RefTestOb{
-	"astring val", -33, 42, 0.25, []int{1,2,3},
-	map[string]int{"a":13, "b": 14}, false}
+	"astring val", -33, 42, 0.25, []int{1, 2, 3},
+	map[string]int{"a": 13, "b": 14}, false}
 
 /*
 #python
@@ -293,7 +290,7 @@ import json
 import cbor
 import base64
 # copy in the above json string literal here:
-jsonstr = 
+jsonstr =
 print base64.b64encode(cbor.dumps(json.loads(jsonstr)))
 */
 
@@ -302,7 +299,7 @@ func TestDecodeReflectivelyOne(t *testing.T) {
 	t.Log("test decode reflectively one")
 
 	var err error
-	
+
 	jd := json.NewDecoder(strings.NewReader(reflexObOneJson))
 	jd.UseNumber()
 	they := RefTestOb{}
@@ -340,7 +337,7 @@ func TestEncodeWithPrivate(t *testing.T) {
 	t.Log("test encode with private")
 
 	var err error
-	ob := privateTestOb{1,2,3}
+	ob := privateTestOb{1, 2, 3}
 
 	writeTarget := &bytes.Buffer{}
 	writeTarget.Grow(20000)
@@ -369,7 +366,7 @@ func TestEncodeWithPrivate(t *testing.T) {
 		}
 	}
 
-	xo := privateTestOb{-1,-1,-1}
+	xo := privateTestOb{-1, -1, -1}
 	scratch := writeTarget.Bytes()
 	dec := NewDecoder(bytes.NewReader(scratch))
 	err = dec.Decode(&xo)
@@ -435,11 +432,10 @@ func TestOSO(t *testing.T) {
 	//objectSerializedObject(t, []int{})
 	//objectSerializedObject(t, []int{1,2,3})
 	objectSerializedObject(t, "hello")
-	objectSerializedObject(t, []byte{1,3,2})
+	objectSerializedObject(t, []byte{1, 3, 2})
 	//objectSerializedObject(t, RefTestOb{"hi", -1000, 137, 0.5, nil, nil, true})
-//	objectSerializedObject(t, )
+	//	objectSerializedObject(t, )
 }
-
 
 func TestRefStruct(t *testing.T) {
 	t.Log("test hard")
@@ -448,26 +444,25 @@ func TestRefStruct(t *testing.T) {
 	checkObOne(trto, t)
 }
 
-
 func TestArrays(t *testing.T) {
 	t.Log("test arrays")
-	
+
 	// okay, sooo, slices
-	ia := []int{1,2,3}
+	ia := []int{1, 2, 3}
 	tia := []int{}
 	objectSerializedTargetObject(t, ia, &tia)
-	if ! reflect.DeepEqual(ia, tia) {
+	if !reflect.DeepEqual(ia, tia) {
 		t.Errorf("int array %#v != %#v", ia, tia)
 	}
 
 	// actual arrays
-	xa := [3]int{4,5,6}
+	xa := [3]int{4, 5, 6}
 	txa := [3]int{}
 	objectSerializedTargetObject(t, xa, &txa)
-	if ! reflect.DeepEqual(xa, txa) {
+	if !reflect.DeepEqual(xa, txa) {
 		t.Errorf("int array %#v != %#v", xa, txa)
 	}
-	
+
 	oa := [3]interface{}{"hi", 2, -3.14}
 	toa := [3]interface{}{}
 	objectSerializedTargetObject(t, oa, &toa)
@@ -483,16 +478,16 @@ func TestArrays(t *testing.T) {
 }
 
 type TaggedStruct struct {
-	One string `json:"m_one_s"`
-	Two int `json:"bunnies,omitempty"`
+	One   string  `json:"m_one_s"`
+	Two   int     `json:"bunnies,omitempty"`
 	Three float64 `json:"htree_json" cbor:"three_cbor"`
 }
 
 func PracticalInt64(xi interface{}) (int64, bool) {
 	switch i := xi.(type) {
 	//case int, int8, int16, int32, int64, uint8, uint16, uint32:
-		//oi, ok := i.(int64)
-		//return oi, ok
+	//oi, ok := i.(int64)
+	//return oi, ok
 	case int:
 		return int64(i), true
 	case int64:
@@ -519,6 +514,7 @@ func ms(d map[string]interface{}, k string, t *testing.T) (string, bool) {
 	xs, ok := ob.(string)
 	return xs, ok
 }
+
 // I wish go had templates!
 func mi(d map[string]interface{}, k string, t *testing.T) (int64, bool) {
 	if d == nil {
@@ -550,9 +546,9 @@ func mf64(d map[string]interface{}, k string, t *testing.T) (float64, bool) {
 
 func TestStructTags(t *testing.T) {
 	t.Log("StructTags")
-	
+
 	ob := TaggedStruct{"hello", 42, 6.28}
-	
+
 	blob, err := Dumps(ob)
 	if err != nil {
 		t.Error(err)
