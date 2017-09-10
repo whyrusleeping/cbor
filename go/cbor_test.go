@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type testVector struct {
@@ -579,5 +580,93 @@ func TestStructTags(t *testing.T) {
 	}
 	if ob != ob2 {
 		t.Errorf("a!=b %#v != %#v", ob, ob2)
+	}
+}
+
+// testTag is a CBOR tag number used to test decoding tagged values
+var testTag uint64 = 100
+
+// testTagDecoder implements the TagDecoder interface by decoding an RFC3339
+// formatted time string into a time object
+type testTagDecoder struct{}
+
+// GetTag returns the test CBOR tag number
+func (t *testTagDecoder) GetTag() uint64 {
+	return testTag
+}
+
+// DecodeTarget returns a pointer to an empty string which the raw tag value
+// will be decoded into (ready for PostDecode to decode into a time object)
+func (t *testTagDecoder) DecodeTarget() interface{} {
+	var s string
+	return &s
+}
+
+// PostDecode decodes the string tag value into a time object
+func (t *testTagDecoder) PostDecode(i interface{}) (interface{}, error) {
+	s, ok := i.(*string)
+	if !ok {
+		return nil, fmt.Errorf("testTagDecoder PostDecode expects *string, got %T", i)
+	}
+	return time.Parse(time.RFC3339Nano, *s)
+}
+
+// testTagFilter is an encoder filter which encodes time objects as tagged
+// RFC3339 formatted strings
+func testTagFilter(i interface{}) interface{} {
+	var t time.Time
+	switch v := i.(type) {
+	case time.Time:
+		t = v
+	case *time.Time:
+		t = *v
+	default:
+		return i
+	}
+	return &CBORTag{
+		Tag:           testTag,
+		WrappedObject: t.Format(time.RFC3339Nano),
+	}
+}
+
+// testTagObj is used by TestTagDecode to test tag decoding
+type testTagObj struct {
+	Time    time.Time
+	TimePtr *time.Time
+}
+
+// TestTagDecode tests decoding tagged values
+func TestTagDecode(t *testing.T) {
+	// encode a testTagObj
+	ref := time.Unix(0, 0).UTC()
+	v := &testTagObj{
+		Time:    ref,
+		TimePtr: &ref,
+	}
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf)
+	enc.SetFilter(testTagFilter)
+	if err := enc.Encode(v); err != nil {
+		t.Fatal(err)
+	}
+
+	// check it matches what we expect
+	expected, err := base64.StdEncoding.DecodeString("omRUaW1l2GR0MTk3MC0wMS0wMVQwMDowMDowMFpnVGltZVB0cthkdDE5NzAtMDEtMDFUMDA6MDA6MDBa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf.Bytes(), expected) {
+		t.Fatalf("unexpected encoding:\nexpected: %x\nactual:   %x", expected, buf.Bytes())
+	}
+
+	// check that decoding with the testTagDecoder produces the same object
+	w := &testTagObj{}
+	dec := NewDecoder(&buf)
+	dec.TagDecoders[testTag] = &testTagDecoder{}
+	if err := dec.Decode(w); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(v, w) {
+		t.Fatalf("decoded object not equal:\nexpected %#v\nactual   %#v", v, w)
 	}
 }
