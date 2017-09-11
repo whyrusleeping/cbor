@@ -645,12 +645,11 @@ func (r *reflectValueMap) CreateMapKey() (DecodeValue, error) {
 }
 
 func (r *reflectValueMap) CreateMapValue(key DecodeValue) (DecodeValue, error) {
-	var err error
 	v, ok := r.ma.ReflectValueForKey(key.(*reflectValue).v.Interface())
 	if !ok {
-		err = fmt.Errorf("Could not reflect value for key")
+		return nil, errors.New("Could not reflect value for key")
 	}
-	return newReflectValue(*v), err
+	return newReflectValue(*v), nil
 }
 
 func (r *reflectValueMap) SetMap(key, val DecodeValue) error {
