@@ -72,6 +72,10 @@ var tagNegBignum uint64 = 3
 var tagDecimal uint64 = 4
 var tagBigfloat uint64 = 5
 
+/* batch sizes */
+var byteBatch = 1 << 20
+var arrayBatch = 1 << 14 //16k
+
 // TODO: honor encoding.BinaryMarshaler interface and encapsulate blob returned from that.
 
 // Load one object into v
@@ -99,10 +103,10 @@ type TagDecoder interface {
 }
 
 type Decoder struct {
-	rin io.Reader
+	reader io.Reader
 
 	// tag byte
-	c []byte
+	tag []byte
 
 	// many values fit within the next 8 bytes
 	b8 []byte
@@ -113,8 +117,8 @@ type Decoder struct {
 
 func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{
-		rin:         r,
-		c:           make([]byte, 1),
+		reader:      r,
+		tag:         make([]byte, 1),
 		b8:          make([]byte, 8),
 		TagDecoders: make(map[uint64]TagDecoder),
 	}
@@ -223,7 +227,7 @@ func (r *reflectValue) Prepare() error {
 func (dec *Decoder) DecodeAny(v DecodeValue) error {
 	var err error
 
-	_, err = io.ReadFull(dec.rin, dec.c)
+	_, err = io.ReadFull(dec.reader, dec.tag)
 	if err != nil {
 		return err
 	}
@@ -232,7 +236,7 @@ func (dec *Decoder) DecodeAny(v DecodeValue) error {
 		return err
 	}
 
-	return dec.innerDecodeC(v, dec.c[0])
+	return dec.innerDecodeC(v, dec.tag[0])
 }
 
 func (dec *Decoder) handleInfoBits(cborInfo byte) (uint64, error) {
@@ -242,19 +246,19 @@ func (dec *Decoder) handleInfoBits(cborInfo byte) (uint64, error) {
 		aux = uint64(cborInfo)
 		return aux, nil
 	} else if cborInfo == int8Follows {
-		didread, err := io.ReadFull(dec.rin, dec.b8[:1])
+		didread, err := io.ReadFull(dec.reader, dec.b8[:1])
 		if didread == 1 {
 			aux = uint64(dec.b8[0])
 		}
 		return aux, err
 	} else if cborInfo == int16Follows {
-		didread, err := io.ReadFull(dec.rin, dec.b8[:2])
+		didread, err := io.ReadFull(dec.reader, dec.b8[:2])
 		if didread == 2 {
 			aux = (uint64(dec.b8[0]) << 8) | uint64(dec.b8[1])
 		}
 		return aux, err
 	} else if cborInfo == int32Follows {
-		didread, err := io.ReadFull(dec.rin, dec.b8[:4])
+		didread, err := io.ReadFull(dec.reader, dec.b8[:4])
 		if didread == 4 {
 			aux = (uint64(dec.b8[0]) << 24) |
 				(uint64(dec.b8[1]) << 16) |
@@ -263,7 +267,7 @@ func (dec *Decoder) handleInfoBits(cborInfo byte) (uint64, error) {
 		}
 		return aux, err
 	} else if cborInfo == int64Follows {
-		didread, err := io.ReadFull(dec.rin, dec.b8)
+		didread, err := io.ReadFull(dec.reader, dec.b8)
 		if didread == 8 {
 			var shift uint = 56
 			i := 0
@@ -311,7 +315,7 @@ func (dec *Decoder) innerDecodeC(rv DecodeValue, c byte) error {
 			allsize := 0
 			subc := []byte{0}
 			for true {
-				_, err = io.ReadFull(dec.rin, subc)
+				_, err = io.ReadFull(dec.reader, subc)
 				if err != nil {
 					log.Printf("error reading next byte for bar bytes")
 					return err
@@ -344,18 +348,11 @@ func (dec *Decoder) innerDecodeC(rv DecodeValue, c byte) error {
 				}
 			}
 		} else {
-			val := make([]byte, aux)
-			_, err = io.ReadFull(dec.rin, val)
+			val, err := dec.readBytes(aux)
 			if err != nil {
 				return err
 			}
-			// Don't really care about count, ReadFull will make it all or none and we can just fall out with whatever error
 			return rv.SetBytes(val)
-			/*if (rv.Kind() == reflect.Slice) && (rv.Type().Elem().Kind() == reflect.Uint8) {
-				rv.SetBytes(val)
-			} else {
-				return fmt.Errorf("cannot write []byte to k=%s %s", rv.Kind().String(), rv.Type().String())
-			}*/
 		}
 	} else if cborType == cborText {
 		return dec.decodeText(rv, cborInfo, aux)
@@ -366,7 +363,7 @@ func (dec *Decoder) innerDecodeC(rv DecodeValue, c byte) error {
 	} else if cborType == cborTag {
 		/*var innerOb interface{}*/
 		ic := []byte{0}
-		_, err = io.ReadFull(dec.rin, ic)
+		_, err = io.ReadFull(dec.reader, ic)
 		if err != nil {
 			return err
 		}
@@ -450,7 +447,7 @@ func (dec *Decoder) decodeText(rv DecodeValue, cborInfo byte, aux uint64) error 
 		parts := make([]string, 0, 1)
 		subc := []byte{0}
 		for true {
-			_, err = io.ReadFull(dec.rin, subc)
+			_, err = io.ReadFull(dec.reader, subc)
 			if err != nil {
 				log.Printf("error reading next byte for var text")
 				return err
@@ -475,12 +472,31 @@ func (dec *Decoder) decodeText(rv DecodeValue, cborInfo byte, aux uint64) error 
 			}
 		}
 	} else {
-		raw := make([]byte, aux)
-		_, err = io.ReadFull(dec.rin, raw)
+		raw, err := dec.readBytes(aux)
+		if err != nil {
+			return err
+		}
 		xs := string(raw)
 		return rv.SetString(xs)
 	}
 	return errors.New("internal error in decodeText, shouldn't get here")
+}
+
+func (dec *Decoder) readBytes(n uint64) ([]byte, error) {
+	var val []byte
+	buf := make([]byte, min(n, uint64(byteBatch)))
+	for {
+		read, err := io.ReadFull(dec.reader, buf[:min(n, uint64(byteBatch))])
+		if err != nil {
+			return nil, err
+		}
+		val = append(val, buf...)
+		n -= uint64(read)
+		if n <= 0 {
+			break
+		}
+	}
+	return val, nil
 }
 
 type mapAssignable interface {
@@ -678,7 +694,7 @@ func (dec *Decoder) decodeMap(rv DecodeValue, cborInfo byte, aux uint64) error {
 	if cborInfo == varFollows {
 		subc := []byte{0}
 		for true {
-			_, err = io.ReadFull(dec.rin, subc)
+			_, err = io.ReadFull(dec.reader, subc)
 			if err != nil {
 				log.Printf("error reading next byte for var text")
 				return err
@@ -804,7 +820,7 @@ func (dec *Decoder) decodeArray(rv DecodeValue, cborInfo byte, aux uint64) error
 		makeLength = int(aux)
 	}
 
-	dva, err = rv.CreateArray(makeLength)
+	dva, err = rv.CreateArray(int(min(uint64(makeLength), uint64(arrayBatch))))
 	if err != nil {
 		return err
 	}
@@ -814,7 +830,7 @@ func (dec *Decoder) decodeArray(rv DecodeValue, cborInfo byte, aux uint64) error
 		subc := []byte{0}
 		var idx uint64 = 0
 		for true {
-			_, err = io.ReadFull(dec.rin, subc)
+			_, err = io.ReadFull(dec.reader, subc)
 			if err != nil {
 				log.Printf("error reading next byte for var text")
 				return err
@@ -875,8 +891,7 @@ func (dec *Decoder) decodeBignum(c byte) (*big.Int, error) {
 		return nil, fmt.Errorf("attempting to decode bignum but sub object is not bytes but type %x", cborType)
 	}
 
-	rawbytes := make([]byte, aux)
-	_, err = io.ReadFull(dec.rin, rawbytes)
+	rawbytes, err := dec.readBytes(aux)
 	if err != nil {
 		return nil, err
 	}
@@ -1272,8 +1287,8 @@ func (enc *Encoder) writeReflection(rv reflect.Value) error {
 		rv = reflect.ValueOf(enc.filter(rv.Interface()))
 	}
 
-	if ! rv.IsValid() {
-	   return enc.tagAuxOut(cbor7, uint64(cborNull))
+	if !rv.IsValid() {
+		return enc.tagAuxOut(cbor7, uint64(cborNull))
 	}
 
 	if v, ok := rv.Interface().(MarshallValue); ok {
@@ -1604,4 +1619,11 @@ func (enc *Encoder) writeBool(x bool) error {
 	} else {
 		return enc.tagAuxOut(cbor7, uint64(cborFalse))
 	}
+}
+
+func min(x, y uint64) uint64 {
+	if x < y {
+		return x
+	}
+	return y
 }
