@@ -483,20 +483,16 @@ func (dec *Decoder) decodeText(rv DecodeValue, cborInfo byte, aux uint64) error 
 }
 
 func (dec *Decoder) readBytes(n uint64) ([]byte, error) {
-	var val []byte
-	buf := make([]byte, min(n, uint64(byteBatch)))
-	for {
-		read, err := io.ReadFull(dec.reader, buf[:min(n, uint64(byteBatch))])
-		if err != nil {
-			return nil, err
-		}
-		val = append(val, buf...)
-		n -= uint64(read)
-		if n <= 0 {
-			break
-		}
+	buf := new(bytes.Buffer)
+	r, err := buf.ReadFrom(&io.LimitedReader{R: dec.reader, N: int64(n)})
+	if err != nil {
+		return nil, err
 	}
-	return val, nil
+
+	if r != int64(n) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return buf.Bytes(), nil
 }
 
 type mapAssignable interface {
