@@ -585,3 +585,40 @@ func TestStructTags(t *testing.T) {
 		t.Errorf("a!=b %#v != %#v", ob, ob2)
 	}
 }
+
+const (
+	incSizeStrB64 = "eDVhYWE="
+	incSizeBytesB64 = "WDVhYWE="
+	incSizeArrayB64 = "mDUBAQE="
+)
+
+func TestIncorrectSize(t *testing.T) {
+	bin, _ := base64.StdEncoding.DecodeString(incSizeStrB64)
+	dec := NewDecoder(bytes.NewReader(bin))
+
+	var outStr string
+	err := dec.Decode(&outStr)
+	if err.Error() != "unexpected EOF" {
+		t.Fatal("unexpected error decoding cbor b64", err)
+		return
+	}
+
+	bin, _ = base64.StdEncoding.DecodeString(incSizeBytesB64)
+	dec = NewDecoder(bytes.NewReader(bin))
+
+	var outBytes []byte
+	err = dec.Decode(&outBytes)
+	if err.Error() != "unexpected EOF" {
+		t.Fatal("unexpected error decoding cbor b64", err)
+		return
+	}
+
+	bin, _ = base64.StdEncoding.DecodeString(incSizeArrayB64)
+	dec = NewDecoder(bytes.NewReader(bin))
+
+	err = dec.Decode(&outBytes)
+	if err.Error() != "EOF" {
+		t.Fatal("unexpected error decoding cbor b64", err)
+		return
+	}
+}
